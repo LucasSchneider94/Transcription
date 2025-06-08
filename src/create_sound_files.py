@@ -1,8 +1,6 @@
-
 import os
-import cv2
 import numpy as np
-os.environ["PATH"] += os.pathsep + "/opt/homebrew/bin"
+# os.environ["PATH"] += os.pathsep + "/opt/homebrew/bin"
 from midiutil import MIDIFile
 from midi2audio import FluidSynth
 from pydub import AudioSegment
@@ -21,9 +19,6 @@ def createMidi(notes, pathlocal="/Users/lucasschneider/Desktop/Privat/Transcript
     
     # Create new folder
     os.makedirs(folder_name)
-    
-
-
     
     # Step 1: Create MIDI
     midi = MIDIFile(1)

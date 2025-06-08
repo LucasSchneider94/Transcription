@@ -10,6 +10,7 @@ from pydub import AudioSegment
 from scipy.io import wavfile
 import soundfile as sf
 from scipy.signal import spectrogram
+from tqdm import tqdm
 
 def process_midi(mid_path, output_dir, soundfont_path, samplerate=44000):
     os.makedirs(output_dir, exist_ok=True)
@@ -58,20 +59,22 @@ def process_midi(mid_path, output_dir, soundfont_path, samplerate=44000):
 
 
 def process_all_midis(root_folder, output_folder, soundfont_path, samplerate=44000):
-    for current_dir, _, files in os.walk(root_folder):
-        for file_name in files:
-            if file_name.lower().endswith(".mid"):
-                mid_path = os.path.join(current_dir, file_name)
-                relative_path = os.path.relpath(mid_path, root_folder)
-                flat_folder_name = os.path.splitext(relative_path)[0].replace(os.sep, "_")
-                sub_output_dir = os.path.join(output_folder, flat_folder_name)
-                process_midi(mid_path, sub_output_dir, soundfont_path, samplerate)
-
+    for current_dir, _, files in tqdm(os.walk(root_folder)):
+        try:
+            for file_name in files:
+                if file_name.lower().endswith(".mid"):
+                    mid_path = os.path.join(current_dir, file_name)
+                    relative_path = os.path.relpath(mid_path, root_folder)
+                    flat_folder_name = os.path.splitext(relative_path)[0].replace(os.sep, "_")
+                    sub_output_dir = os.path.join(output_folder, flat_folder_name)
+                    process_midi(mid_path, sub_output_dir, soundfont_path, samplerate)
+        except:
+            pass
 
 
 if __name__ == "__main__":
-    root_folder = "/workspace/adl-piano-midi/midi/adl-piano-midi/Ambient/Ambient/Roger Eno"
-    output_folder = "all_results"
+    root_folder = "/workspace/adl-piano-midi/midi/adl-piano-midi"
+    output_folder = "with_spectogram_all"
     soundfont = "/usr/share/sounds/sf2/FluidR3_GM.sf2"
     samplerate = 22000
     process_all_midis(
