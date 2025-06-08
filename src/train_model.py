@@ -126,6 +126,17 @@ def train_model(
 # 5) Main
 ###############################################################################
 if __name__ == "__main__":
+
+    if torch.cuda.is_available():
+        my_device = torch.device("cuda")
+        print("Using CUDA")
+    elif torch.backends.mps.is_available():
+        my_device = torch.device("mps")
+        print("Using MPS (Apple GPU)")
+    else:
+        my_device = torch.device("cpu")
+        print("Using CPU")
+
     audio_model = AudioSegmentationModel(
         num_notes=120,
         cnn_kernel_size=24,
@@ -138,7 +149,7 @@ if __name__ == "__main__":
     )
     train_model(
         model=audio_model,
-        device="cuda",
+        device=my_device,
         parent_folder="/workspace/src/output",
         batch_size=8,
         num_epochs=10000,
