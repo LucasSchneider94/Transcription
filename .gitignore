@@ -174,8 +174,7 @@ cython_debug/
 .pypirc
 .DS_Store
 *.ipynb
-*.mid
+*/output
+*.wav
 *.npy
 *.npz
-*.sf2
-*.wav
