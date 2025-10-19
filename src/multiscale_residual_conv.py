@@ -82,6 +82,45 @@ class MultiScaleResidualCNN(nn.Module):
         # Prediction head
         self.prediction_layer = nn.Conv1d(channels, n_notes, kernel_size=1)
 
+        # Losses
+        self.losses=[]
+        self.eval_losses=[]
+        self.learning_rate=[]
+    
+        self.F1=[]
+        self.R=[]
+        self.P=[]
+        self.F1EVAL=[]
+        self.REVAL=[]
+        self.PEVAL=[]
+    
+    def addLosses(self, val):
+        self.losses.append(val)
+
+    def addEvalLosses(self, val):
+        self.eval_losses.append(val)
+
+    def addLR(self, val):
+        self.learning_rate.append(val)
+
+    def addF1(self, val):
+        self.F1.append(val)
+
+    def addR(self, val):
+        self.R.append(val)
+
+    def addP(self, val):
+        self.P.append(val)
+
+    def addF1EVAL(self, val):
+        self.F1EVAL.append(val)
+
+    def addREVAL(self, val):
+        self.REVAL.append(val)
+
+    def addPEVAL(self, val):
+        self.PEVAL.append(val)
+
     def forward(self, x):
         # Input shape: (batch, time, channels)
         # x = x.permute(0, 2, 1)  # -> (batch, channels, time)

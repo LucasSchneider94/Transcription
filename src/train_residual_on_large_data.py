@@ -14,6 +14,7 @@ import numpy as np
 import torchaudio
 from torch.utils.data import Dataset
 from scipy.sparse import load_npz
+import matplotlib.pyplot as plt
 ###############################################################################
 # 1) Helper functions
 ###############################################################################
@@ -65,6 +66,9 @@ class WavRollSparseDataset(Dataset):
         super().__init__()
         self.root_dir = root_dir
         self.window_size = window_size
+        if not os.path.exists(root_dir):
+            print(f"Error: Root folder does not exist: {root_dir}")
+            pass
 
         # Collect subfolders
         self.subfolders = [
@@ -153,6 +157,7 @@ def eval_model(model, dataloader, device, stride):
             loss = criterion(logits, downsampled_labels)
             total_loss += loss.item()
     avg_loss = total_loss / len(dataloader)
+    model.addEvalLosses(avg_loss)
     print(f"Eval Loss: {avg_loss:.4f}")
     model.train()
 
@@ -167,7 +172,7 @@ def train_model(
     learning_rate=1e-4,
     eval_interval=50,
     train_split=0.8,
-    root_dir="/workspace/src/all_results"
+    root_dir="with_spectogram_all"
 ):
     model.to(device)
 
@@ -177,7 +182,7 @@ def train_model(
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.BCEWithLogitsLoss()
@@ -206,6 +211,7 @@ def train_model(
 
         if (epoch + 1) % eval_interval == 0:
             avg_loss = running_loss / len(train_loader)
+            model.addLosses(avg_loss)
             print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}")
 
         if (epoch + 1) % eval_interval == 0:
@@ -217,6 +223,18 @@ def train_model(
 # 5) Main
 ###############################################################################
 if __name__ == "__main__":
+
+    if torch.cuda.is_available():
+        my_device = torch.device("cuda")
+        print("Using CUDA")
+    elif torch.backends.mps.is_available():
+        my_device = torch.device("mps")
+        print("Using MPS (Apple GPU)")
+    else:
+        my_device = torch.device("cpu")
+        print("Using CPU")
+
+
     audio_model = MultiScaleResidualCNN(
         n_notes=128,
         base_channels=64,
@@ -227,11 +245,18 @@ if __name__ == "__main__":
         multiscale_kernel_sizes=[5, 5, 5,5,5],
         use_multiscale=True
     )
+
+    epochs=20
+
     train_model(
         model=audio_model,
-        device="cuda",
+        device=my_device,
         batch_size=8,
-        num_epochs=10000,
+        num_epochs=epochs, #10000
         eval_interval=1,
         train_split=0.8,
     )
+
+    plt.plot(range(epochs),audio_model.losses, label="Loss")
+    plt.plot(range(epochs),audio_model.eval_losses, label="Eval Loss")
+    plt.show()

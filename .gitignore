@@ -176,6 +176,12 @@ cython_debug/
 *.ipynb
 *.sf2
 *.wav
+*.mp3
+*.json
+*.csv
+*.pt
 *.mid
+*.midi
 *.npy
 *.npz
+*.png

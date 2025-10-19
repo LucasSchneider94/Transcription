@@ -59,6 +59,7 @@ def process_midi(mid_path, output_dir, soundfont_path, samplerate=44000):
 
 
 def process_all_midis(root_folder, output_folder, soundfont_path, samplerate=44000):
+
     for current_dir, _, files in tqdm(os.walk(root_folder)):
         try:
             for file_name in files:
@@ -68,14 +69,20 @@ def process_all_midis(root_folder, output_folder, soundfont_path, samplerate=440
                     flat_folder_name = os.path.splitext(relative_path)[0].replace(os.sep, "_")
                     sub_output_dir = os.path.join(output_folder, flat_folder_name)
                     process_midi(mid_path, sub_output_dir, soundfont_path, samplerate)
-        except:
-            pass
-
+        except Exception as e: # Catch all exceptions for now
+            print(f"An error occurred while processing {file_name}: {e}")
+            # Optionally, you might want to log the full traceback:
+            # import traceback
+            # traceback.print_exc() 
 
 if __name__ == "__main__":
-    root_folder = "/workspace/adl-piano-midi/midi/adl-piano-midi"
+    root_folder = "with_spectrogram_custom" #"../adl-piano-midi-master/midi/adl-piano-midi/Ambient"
+    print(f"Root folder being processed: {root_folder}")
+    if not os.path.exists(root_folder):
+        print(f"Error: Root folder does not exist: {root_folder}")
+        pass # Exit if folder doesn't exist
     output_folder = "with_spectogram_all"
-    soundfont = "/usr/share/sounds/sf2/FluidR3_GM.sf2"
+    soundfont = "../FluidR3_GM.sf2"
     samplerate = 22000
     process_all_midis(
         root_folder=root_folder,
