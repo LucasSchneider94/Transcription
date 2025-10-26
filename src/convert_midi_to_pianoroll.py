@@ -145,15 +145,37 @@ def build_piano_roll_and_onsets(midi_data, roll_fps=250):
 
     return piano_roll, onsets
 
+def build_decay_piano_roll(midi_data, roll_fps=250, decay_rate=0.9, decay_duration=1.0):
+    n_keys = 128
+    end_time = midi_data.get_end_time()
+    n_frames = int(end_time * roll_fps) + 1  # total frames
+    piano_roll = np.zeros((n_frames, n_keys), dtype=np.float32)
+
+    for instrument in midi_data.instruments:
+        if instrument.is_drum:
+            continue  # skip drums
+        for note in instrument.notes:
+            start_frame = int(note.start * roll_fps)
+            end_frame = int(note.end * roll_fps)
+            piano_roll[start_frame:end_frame, note.pitch] = 1.0  # Active note
+
+            # Add decay phase
+            decay_frames = int(decay_duration * roll_fps)
+            for i in range(1, decay_frames + 1):
+                decay_frame = end_frame + i
+                if decay_frame >= n_frames:
+                    break
+                piano_roll[decay_frame, note.pitch] = max(0, piano_roll[end_frame, note.pitch] * (decay_rate ** i))
+
+    return piano_roll
 
 def process_midi(mid_path, output_dir, roll_fps=250):
-    
     # Load MIDI and compute piano roll (shape: 128 x T)
     midi_data = pretty_midi.PrettyMIDI(mid_path)
     file_name = os.path.splitext(os.path.basename(mid_path))[0]
-    #piano_roll = midi_data.get_piano_roll(fs=roll_fps)
-    # Binarize (active note if >0) and transpose to shape: T x 128
-    piano_roll_binary = build_clean_piano_roll(midi_data, roll_fps=roll_fps) #piano_roll_binary = (piano_roll > 20).astype(np.uint8).T
+
+    # Use the new decay-aware piano roll
+    piano_roll_binary = build_decay_piano_roll(midi_data, roll_fps=roll_fps)
     onset_roll_binary = build_clean_onset_roll(midi_data, roll_fps=roll_fps)
 
     # Convert to sparse matrix (CSR format) and save as .npz
@@ -164,7 +186,6 @@ def process_midi(mid_path, output_dir, roll_fps=250):
     sparse_filename = os.path.join(output_dir, f"{file_name}_onsets_sparse.npz")
     sp.save_npz(sparse_filename, sparse_onset_roll)
     print(f"NumPy files saved to {output_dir}")
-
 
 def process_all_midis(root_folder, output_folder, roll_fps=250):
 

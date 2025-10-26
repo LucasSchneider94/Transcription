@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data files - EXCLUDE ALL DATA
+*.wav
+*.mid
+*.midi
+*.mp3
+*.flac
+*.npy
+*.npz
+*.png
+*.jpg
+*.jpeg
+
+# Training outputs
+training_run_*/
+inference_results/
+processed_data/
+data_subset/
+Test_data/
+
+# MAESTRO dataset (if downloaded here)
+maestro-v*/
+
+# Model checkpoints
+*.pth
+*.pt
+*.ckpt
+
+# Logs
+*.log
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
