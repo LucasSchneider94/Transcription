@@ -464,6 +464,33 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     criterion = nn.BCELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
     
+    # Learning rate scheduler
+    scheduler = None
+    if CONFIG.get('use_lr_scheduler', False):
+        if CONFIG['scheduler_type'] == 'reduce_on_plateau':
+            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, 
+                mode='min',
+                factor=CONFIG['scheduler_factor'],
+                patience=CONFIG['scheduler_patience'],
+                min_lr=CONFIG['scheduler_min_lr']
+            )
+            print(f"Using ReduceLROnPlateau scheduler (patience={CONFIG['scheduler_patience']}, factor={CONFIG['scheduler_factor']})")
+        elif CONFIG['scheduler_type'] == 'cosine':
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=num_epochs,
+                eta_min=CONFIG['scheduler_min_lr']
+            )
+            print(f"Using CosineAnnealingLR scheduler")
+        elif CONFIG['scheduler_type'] == 'step':
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=30,
+                gamma=CONFIG['scheduler_factor']
+            )
+            print(f"Using StepLR scheduler")
+    
     # Define output paths in run folder
     model_save_path = os.path.join(run_folder, "model.pth")
     curves_save_path = os.path.join(run_folder, "training_curves.png")
@@ -517,6 +544,17 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
         print(f"Train - P: {train_metrics['precision']:.4f}, R: {train_metrics['recall']:.4f}, F1: {train_metrics['f1']:.4f}")
         print(f"Val   - P: {val_metrics['precision']:.4f}, R: {val_metrics['recall']:.4f}, F1: {val_metrics['f1']:.4f}")
         
+        # Update learning rate scheduler
+        if scheduler is not None:
+            if CONFIG['scheduler_type'] == 'reduce_on_plateau':
+                scheduler.step(val_loss)  # ReduceLROnPlateau needs the metric
+            else:
+                scheduler.step()  # Other schedulers don't need metrics
+            
+            # Print current learning rate
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"Current Learning Rate: {current_lr:.2e}")
+        
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -538,8 +576,8 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
                 curves_save_path  # Overwrite the same file
             )
         
-        # Visualize predictions every 100 epochs
-        if (epoch + 1) % 100 == 0:
+        # Visualize predictions every 50 epochs
+        if (epoch + 1) % 50 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
     

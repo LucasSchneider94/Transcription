@@ -163,8 +163,8 @@ def resume_training():
                 curves_save_path
             )
         
-        # Visualize predictions every 100 epochs
-        if (epoch + 1) % 100 == 0:
+        # Visualize predictions every 50 epochs
+        if (epoch + 1) % 50 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
     

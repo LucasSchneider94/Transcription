@@ -11,14 +11,21 @@ CONFIG = {
     
     # Training parameters
     'snippet_duration': 3.0,   # Duration of each training snippet in seconds
-    'batch_size': 8,           # Batch size for training
-    'learning_rate': 1e-4,     # Learning rate for optimizer
+    'batch_size': 16,          # Batch size for training (increased from 8 for better gradient estimates)
+    'learning_rate': 1e-4,     # Initial learning rate for optimizer
     'num_epochs': 250,         # Number of training epochs
     'hidden_size': 256,        # Hidden size for transformer
     'num_heads': 8,            # Number of attention heads in transformer
     'num_layers': 4,           # Number of transformer layers
     'dropout': 0.3,            # Dropout rate
     'split_year_folder': "2008", # Subset of the MAESTRO dataset to process
+    
+    # Learning rate scheduler settings
+    'use_lr_scheduler': True,  # Enable learning rate scheduling
+    'scheduler_type': 'reduce_on_plateau',  # 'reduce_on_plateau', 'cosine', or 'step'
+    'scheduler_patience': 5,   # Epochs to wait before reducing LR (for reduce_on_plateau)
+    'scheduler_factor': 0.5,   # Factor to reduce LR by (new_lr = lr * factor)
+    'scheduler_min_lr': 1e-6,  # Minimum learning rate
     
     # DataLoader optimization settings (for systems with ample RAM)
     'num_workers': 8,          # Number of parallel data loading workers (0 = single-threaded, 4-8 recommended)
