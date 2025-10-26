@@ -428,8 +428,25 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
         dataset, [train_size, val_size], generator=generator
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    # Optimized DataLoader settings for faster training
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        num_workers=CONFIG['num_workers'],
+        pin_memory=CONFIG['pin_memory'],
+        prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
+        persistent_workers=CONFIG['persistent_workers'] if CONFIG['num_workers'] > 0 else False
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        num_workers=CONFIG['num_workers'],
+        pin_memory=CONFIG['pin_memory'],
+        prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
+        persistent_workers=CONFIG['persistent_workers'] if CONFIG['num_workers'] > 0 else False
+    )
     
     # Create model
     model = PianoTranscriptionModel(
@@ -552,7 +569,7 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     axes[1, 0].plot(val_recalls, label='Val Recall')
     axes[1, 0].set_xlabel('Epoch')
     axes[1, 0].set_ylabel('Recall')
-    axes[1, 0].set_title('Recall')
+    axes[1, 0].setTitle('Recall')
     axes[1, 0].legend()
     axes[1, 0].grid(True)
     
@@ -561,7 +578,7 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     axes[1, 1].plot(val_f1s, label='Val F1')
     axes[1, 1].set_xlabel('Epoch')
     axes[1, 1].set_ylabel('F1 Score')
-    axes[1, 1].set_title('F1 Score')
+    axes[1, 1].setTitle('F1 Score')
     axes[1, 1].legend()
     axes[1, 1].grid(True)
     

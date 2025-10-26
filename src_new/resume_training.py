@@ -60,8 +60,24 @@ def resume_training():
         dataset, [train_size, val_size], generator=generator
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'], shuffle=True, num_workers=0)
-    val_loader = DataLoader(val_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=0)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=CONFIG['batch_size'], 
+        shuffle=True, 
+        num_workers=CONFIG['num_workers'],
+        pin_memory=CONFIG['pin_memory'],
+        prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
+        persistent_workers=CONFIG['persistent_workers'] if CONFIG['num_workers'] > 0 else False
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=CONFIG['batch_size'], 
+        shuffle=False, 
+        num_workers=CONFIG['num_workers'],
+        pin_memory=CONFIG['pin_memory'],
+        prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
+        persistent_workers=CONFIG['persistent_workers'] if CONFIG['num_workers'] > 0 else False
+    )
     
     # Create model and optimizer
     model = PianoTranscriptionModel(

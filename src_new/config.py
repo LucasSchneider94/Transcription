@@ -7,18 +7,24 @@ CONFIG = {
     'plot_pngs': True,        # Boolean to control whether PNGs are plotted for all files
     
     # Data paths
-    'data_dir': './data_subset',  # Directory containing processed data (use './processed_data' for full dataset)
+    'data_dir': './processed_data',  # Directory containing processed data (use './processed_data' for full dataset)
     
     # Training parameters
     'snippet_duration': 3.0,   # Duration of each training snippet in seconds
     'batch_size': 8,           # Batch size for training
     'learning_rate': 1e-4,     # Learning rate for optimizer
-    'num_epochs': 80,         # Number of training epochs
+    'num_epochs': 250,         # Number of training epochs
     'hidden_size': 256,        # Hidden size for transformer
     'num_heads': 8,            # Number of attention heads in transformer
     'num_layers': 4,           # Number of transformer layers
     'dropout': 0.3,            # Dropout rate
-    'split_year_folder': "2008" # Subset of the MAESTRO dataset to process
+    'split_year_folder': "2008", # Subset of the MAESTRO dataset to process
+    
+    # DataLoader optimization settings (for systems with ample RAM)
+    'num_workers': 8,          # Number of parallel data loading workers (0 = single-threaded, 4-8 recommended)
+    'pin_memory': False,       # Set to False for MPS (Apple Silicon), True for CUDA
+    'prefetch_factor': 2,      # Number of batches to prefetch per worker (None if num_workers=0)
+    'persistent_workers': True, # Keep workers alive between epochs (faster but uses more memory)
 }
 
 # Derived constants - hop_length is calculated to ensure alignment
