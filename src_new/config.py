@@ -10,22 +10,36 @@ CONFIG = {
     'data_dir': './processed_data',  # Directory containing processed data (use './processed_data' for full dataset)
     
     # Training parameters
-    'snippet_duration': 3.0,   # Duration of each training snippet in seconds
-    'batch_size': 16,          # Batch size for training (increased from 8 for better gradient estimates)
-    'learning_rate': 1e-4,     # Initial learning rate for optimizer
+    'snippet_duration': 2.0,   # REDUCED: Shorter snippets = harder to memorize patterns (was 3.0)
+    'batch_size': 8,           # Batch size for training (back to original - more updates per epoch)
+    'learning_rate': 5e-5,     # Initial learning rate (more conservative for larger dataset)
     'num_epochs': 250,         # Number of training epochs
     'hidden_size': 256,        # Hidden size for transformer
     'num_heads': 8,            # Number of attention heads in transformer
     'num_layers': 4,           # Number of transformer layers
-    'dropout': 0.3,            # Dropout rate
+    'dropout': 0.6,            # INCREASED: Even stronger regularization (was 0.5) - prevents overfitting
+    'weight_decay': 1e-3,      # INCREASED: Stronger L2 regularization (was 5e-4) - prevents over-complex features
     'split_year_folder': "2008", # Subset of the MAESTRO dataset to process
+    
+    # Data augmentation settings (to prevent overfitting)
+    'snippets_per_file': 40,   # INCREASED: More diversity per epoch (was 30) - see more variations
+    'use_time_masking': True,  # Randomly mask time segments (SpecAugment-style)
+    'time_mask_param': 50,     # INCREASED: More aggressive masking (was 40) - model must be more robust
+    'use_freq_masking': True,  # Randomly mask frequency bands
+    'freq_mask_param': 40,     # INCREASED: More aggressive masking (was 30) - forces learning general features
     
     # Learning rate scheduler settings
     'use_lr_scheduler': True,  # Enable learning rate scheduling
-    'scheduler_type': 'reduce_on_plateau',  # 'reduce_on_plateau', 'cosine', or 'step'
+    'scheduler_type': 'cosine',  # Smooth decay over all epochs (better than plateau)
     'scheduler_patience': 5,   # Epochs to wait before reducing LR (for reduce_on_plateau)
     'scheduler_factor': 0.5,   # Factor to reduce LR by (new_lr = lr * factor)
     'scheduler_min_lr': 1e-6,  # Minimum learning rate
+    'scheduler_threshold': 1e-4,  # Minimum change to qualify as improvement (relative to current best)
+    
+    # Loss function settings
+    'use_focal_loss': False,   # Use BCE Loss (Focal Loss didn't help - problem was data leakage)
+    'focal_alpha': 0.25,       # Weight for positive class (0.25 = positives weighted 4x more)
+    'focal_gamma': 2.0,        # Focusing parameter (2.0 = strong focus on hard examples)
     
     # DataLoader optimization settings (for systems with ample RAM)
     'num_workers': 8,          # Number of parallel data loading workers (0 = single-threaded, 4-8 recommended)

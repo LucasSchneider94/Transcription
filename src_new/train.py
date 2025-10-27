@@ -13,6 +13,53 @@ from model import PianoTranscriptionModel
 from resume_config import RESUME_CONFIG
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance.
+    Focuses training on hard examples and reduces weight of easy negatives.
+    
+    This helps when the dataset has many more 0s (silence) than 1s (notes),
+    preventing the model from being too aggressive with predictions.
+    
+    FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+    
+    Args:
+        alpha (float): Weighting factor for positive class (0-1). 
+                      Higher = more weight on positive examples (notes).
+                      Default 0.25 means positives are weighted 4x more than negatives.
+        gamma (float): Focusing parameter. Higher = more focus on hard examples.
+                      gamma=0 is equivalent to standard BCE loss.
+                      Default 2.0 is commonly used.
+    """
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+    
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: Model predictions (after sigmoid), shape (batch, seq_len, num_outputs)
+            targets: Ground truth, shape (batch, seq_len, num_outputs)
+        """
+        # BCE loss for each element
+        bce_loss = nn.functional.binary_cross_entropy(inputs, targets, reduction='none')
+        
+        # Calculate p_t: probability of the true class
+        p_t = inputs * targets + (1 - inputs) * (1 - targets)
+        
+        # Calculate focal weight: (1 - p_t)^gamma
+        focal_weight = (1 - p_t) ** self.gamma
+        
+        # Calculate alpha weight
+        alpha_weight = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # Combine all components
+        focal_loss = alpha_weight * focal_weight * bce_loss
+        
+        return focal_loss.mean()
+
+
 def get_next_run_folder():
     """
     Find the next available training run folder number.
@@ -42,28 +89,57 @@ def get_next_run_folder():
 class SnippetDataset(Dataset):
     """
     Dataset that randomly samples snippets from spectrograms and piano rolls.
-    Each epoch will see different random snippets for better generalization.
     Uses memory-efficient loading to handle large datasets.
     
+    IMPORTANT: Supports file-based train/val splitting to prevent data leakage.
+    When file_indices is provided, only snippets from those files are included.
+    
+    NEW: Samples random snippet positions on each __getitem__ call, providing
+    strong data augmentation and preventing overfitting to specific positions.
+    
+    AUGMENTATION: Applies SpecAugment-style masking (time and frequency) to spectrograms
+    during training to further prevent overfitting.
+    
     The dataset ensures that:
-    1. All files are seen at least once per epoch
-    2. Additional random snippets provide data augmentation
-    3. Snippet positions are randomized on every access
+    1. Train and validation sets use completely different files (no leakage)
+    2. Each epoch sees different random snippets from the same files (data augmentation)
+    3. All files are seen multiple times per epoch (snippets_per_file times)
+    4. Memory-efficient loading with on-demand random sampling
+    5. Optional time/frequency masking for robustness
     """
-    def __init__(self, data_dir, snippet_frames, snippets_per_file=10):
+    def __init__(self, data_dir, snippet_frames, snippets_per_file=10, seed=42, 
+                 file_indices=None, augment=False, time_mask_param=30, freq_mask_param=20):
         """
         Args:
             data_dir (str): Directory containing processed .npz and .npy files.
             snippet_frames (int): Number of frames per snippet.
-            snippets_per_file (int): Number of random snippets to sample per audio file per epoch.
+            snippets_per_file (int): Number of snippets to sample per file per epoch.
+            seed (int): Random seed for reproducible file selection (NOT snippet positions).
+            file_indices (list, optional): List of file indices to include. If None, use all files.
+                                          Use this to create train/val splits based on files, not snippets.
+            augment (bool): Whether to apply data augmentation (time/freq masking).
+            time_mask_param (int): Maximum number of consecutive time frames to mask.
+            freq_mask_param (int): Maximum number of consecutive frequency bins to mask.
         """
         self.data_dir = data_dir
         self.snippet_frames = snippet_frames
         self.snippets_per_file = snippets_per_file
-        self.files = []
+        self.file_list = []  # List of file_info dicts
+        self.augment = augment
+        self.time_mask_param = time_mask_param
+        self.freq_mask_param = freq_mask_param
+        
+        # Set random seed for reproducible FILE selection (not snippet positions)
+        np.random.seed(seed)
         
         # Collect all valid files (SORTED for reproducibility)
-        files = sorted([f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz")])
+        all_files = sorted([f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz")])
+        
+        # Filter files if file_indices is provided (for train/val split)
+        if file_indices is not None:
+            files = [all_files[i] for i in file_indices if i < len(all_files)]
+        else:
+            files = all_files
         
         for file_name in files:
             piano_roll_path = os.path.join(data_dir, file_name)
@@ -82,11 +158,13 @@ class SnippetDataset(Dataset):
             
             # Only include files that are long enough
             if min_frames >= snippet_frames:
-                self.files.append({
+                file_info = {
                     'spectrogram_path': spectrogram_path,
                     'piano_roll_path': piano_roll_path,
-                    'max_frames': min_frames
-                })
+                    'max_frames': min_frames,
+                    'max_start': min_frames - snippet_frames
+                }
+                self.file_list.append(file_info)
             
             # Close memory-mapped files to free resources
             del spectrogram
@@ -94,34 +172,85 @@ class SnippetDataset(Dataset):
                 piano_roll_data.close()
             del piano_roll_data
         
-        print(f"Loaded {len(self.files)} audio files")
-        print(f"Total snippets per epoch: {len(self)} ({self.snippets_per_file} per file)")
+        # Reset random seed to not affect other random operations
+        np.random.seed(None)
+        
+        num_files = len(self.file_list)
+        total_snippets = num_files * self.snippets_per_file
+        
+        print(f"Loaded {num_files} audio files")
+        print(f"Snippets per epoch: {total_snippets} ({self.snippets_per_file} per file)")
+        print(f"🎲 RANDOM snippet positions - different every epoch (prevents overfitting!)")
+        if self.augment:
+            print(f"🎨 Data augmentation ENABLED: Time masking (max {time_mask_param} frames), Freq masking (max {freq_mask_param} bins)")
+        if file_indices is not None:
+            print(f"Using file-based subset (indices: {len(file_indices)} files)")
+    
+    def _apply_time_mask(self, spectrogram):
+        """Apply time masking (SpecAugment) to spectrogram."""
+        n_mels, n_frames = spectrogram.shape
+        if n_frames < self.time_mask_param:
+            return spectrogram
+        
+        # Random mask width
+        mask_width = np.random.randint(1, self.time_mask_param + 1)
+        # Random start position
+        mask_start = np.random.randint(0, n_frames - mask_width + 1)
+        
+        # Apply mask (set to zero)
+        spectrogram_masked = spectrogram.copy()
+        spectrogram_masked[:, mask_start:mask_start + mask_width] = 0
+        return spectrogram_masked
+    
+    def _apply_freq_mask(self, spectrogram):
+        """Apply frequency masking (SpecAugment) to spectrogram."""
+        n_mels, n_frames = spectrogram.shape
+        if n_mels < self.freq_mask_param:
+            return spectrogram
+        
+        # Random mask width
+        mask_width = np.random.randint(1, self.freq_mask_param + 1)
+        # Random start position
+        mask_start = np.random.randint(0, n_mels - mask_width + 1)
+        
+        # Apply mask (set to zero)
+        spectrogram_masked = spectrogram.copy()
+        spectrogram_masked[mask_start:mask_start + mask_width, :] = 0
+        return spectrogram_masked
     
     def __len__(self):
-        return len(self.files) * self.snippets_per_file
+        return len(self.file_list) * self.snippets_per_file
     
     def __getitem__(self, idx):
         """
-        Returns a random snippet from the audio file corresponding to idx.
+        Returns a RANDOM snippet from a file.
+        Different snippet positions are sampled on each call (strong data augmentation).
         
-        The mapping ensures each file appears snippets_per_file times per epoch,
-        but the DataLoader's shuffle=True randomizes the order they're seen.
-        Each access samples a NEW random position within the file.
+        Args:
+            idx: Index that determines which file to sample from.
+                 Multiple indices map to the same file (snippets_per_file times).
         """
-        # Determine which file to use (deterministic mapping from idx)
-        file_idx = idx % len(self.files)
-        file_info = self.files[file_idx]
+        # Determine which file to sample from
+        file_idx = idx // self.snippets_per_file
+        file_info = self.file_list[file_idx]
         
-        # Randomly sample a starting position (different every time this idx is accessed)
-        max_start = file_info['max_frames'] - self.snippet_frames
-        start_frame = np.random.randint(0, max_start + 1)
+        # RANDOM snippet position - different every time!
+        start_frame = np.random.randint(0, file_info['max_start'] + 1)
         end_frame = start_frame + self.snippet_frames
         
         # Memory-efficient: Load only the required snippet using memory mapping
-        # This loads only the necessary data from disk, not the entire file
         spectrogram_mmap = np.load(file_info['spectrogram_path'], mmap_mode='r')
         spectrogram_snippet = np.array(spectrogram_mmap[:, start_frame:end_frame])  # Copy only the snippet
         del spectrogram_mmap  # Free the memory-mapped file
+        
+        # Apply data augmentation if enabled (training only)
+        if self.augment:
+            # 50% chance to apply time masking
+            if np.random.rand() > 0.5:
+                spectrogram_snippet = self._apply_time_mask(spectrogram_snippet)
+            # 50% chance to apply frequency masking
+            if np.random.rand() > 0.5:
+                spectrogram_snippet = self._apply_freq_mask(spectrogram_snippet)
         
         piano_roll_data = np.load(file_info['piano_roll_path'], mmap_mode='r')
         piano_roll = piano_roll_data["piano_roll"]
@@ -348,7 +477,7 @@ def save_checkpoint(epoch, model, optimizer, train_losses, val_losses,
     Args:
         epoch (int): Current epoch number
         model: The model to save
-        optimizer: The optimizer to save
+        optimizer: The optimizer to save state into
         train_losses, val_losses: Loss history
         train_precisions, val_precisions: Precision history
         train_recalls, val_recalls: Recall history
@@ -415,18 +544,52 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     print(f"Using device: {device}")
     print(f"Saving outputs to: {run_folder}")
     
-    # Create dataset and dataloader
-    dataset = SnippetDataset(data_dir, CONFIG['snippet_frames'])
-    print(f"Dataset size: {len(dataset)} snippets")
+    # FILE-BASED TRAIN/VAL SPLIT (prevents data leakage)
+    # First, get the list of all files
+    all_files = sorted([f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz")])
+    num_files = len(all_files)
+    print(f"Total files found: {num_files}")
     
-    # Split into train/val (80/20) with fixed seed for reproducibility
-    # This ensures the same files are always in train vs validation
-    train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    generator = torch.Generator().manual_seed(42)  # Fixed seed for reproducible splits
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size], generator=generator
+    # Split files into train/val (80/20)
+    train_file_count = int(0.8 * num_files)
+    val_file_count = num_files - train_file_count
+    
+    # Create indices for train and val files (deterministic with seed)
+    np.random.seed(42)
+    file_indices = np.random.permutation(num_files)
+    train_file_indices = file_indices[:train_file_count].tolist()
+    val_file_indices = file_indices[train_file_count:].tolist()
+    np.random.seed(None)  # Reset seed
+    
+    print(f"\n📂 FILE-BASED SPLIT (prevents data leakage):")
+    print(f"  Train files: {train_file_count} ({train_file_count/num_files*100:.1f}%)")
+    print(f"  Val files:   {val_file_count} ({val_file_count/num_files*100:.1f}%)")
+    print(f"  Train and validation sets use COMPLETELY DIFFERENT files!")
+    
+    # Create datasets with file-based filtering
+    train_dataset = SnippetDataset(
+        data_dir, 
+        CONFIG['snippet_frames'], 
+        snippets_per_file=CONFIG.get('snippets_per_file', 10),
+        seed=42,
+        file_indices=train_file_indices,
+        augment=True,  # Enable augmentation for training
+        time_mask_param=CONFIG.get('time_mask_param', 30),
+        freq_mask_param=CONFIG.get('freq_mask_param', 20)
     )
+    val_dataset = SnippetDataset(
+        data_dir, 
+        CONFIG['snippet_frames'], 
+        snippets_per_file=CONFIG.get('snippets_per_file', 10),
+        seed=42,
+        file_indices=val_file_indices,
+        augment=False  # No augmentation for validation
+    )
+    
+    print(f"\n📊 DATASET SUMMARY:")
+    print(f"  Train snippets: {len(train_dataset)}")
+    print(f"  Val snippets:   {len(val_dataset)}")
+    print(f"  Total snippets: {len(train_dataset) + len(val_dataset)}")
     
     # Optimized DataLoader settings for faster training
     train_loader = DataLoader(
@@ -460,9 +623,15 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Loss and optimizer with weight decay
-    criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+    # Loss function - use Focal Loss for imbalanced data or BCE for standard training
+    if CONFIG.get('use_focal_loss', True):
+        criterion = FocalLoss(alpha=CONFIG['focal_alpha'], gamma=CONFIG['focal_gamma'])
+        print(f"Using Focal Loss (alpha={CONFIG['focal_alpha']}, gamma={CONFIG['focal_gamma']}) to handle class imbalance")
+    else:
+        criterion = nn.BCELoss()
+        print("Using standard BCE Loss")
+    
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=CONFIG.get('weight_decay', 1e-5))
     
     # Learning rate scheduler
     scheduler = None
@@ -473,9 +642,11 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
                 mode='min',
                 factor=CONFIG['scheduler_factor'],
                 patience=CONFIG['scheduler_patience'],
-                min_lr=CONFIG['scheduler_min_lr']
+                min_lr=CONFIG['scheduler_min_lr'],
+                threshold=CONFIG.get('scheduler_threshold', 1e-4),
+                threshold_mode='rel'
             )
-            print(f"Using ReduceLROnPlateau scheduler (patience={CONFIG['scheduler_patience']}, factor={CONFIG['scheduler_factor']})")
+            print(f"Using ReduceLROnPlateau scheduler (patience={CONFIG['scheduler_patience']}, factor={CONFIG['scheduler_factor']}, threshold={CONFIG.get('scheduler_threshold', 1e-4)})")
         elif CONFIG['scheduler_type'] == 'cosine':
             scheduler = optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
@@ -566,8 +737,8 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
                         train_precisions, val_precisions, train_recalls, val_recalls,
                         train_f1s, val_f1s, best_val_loss, checkpoint_save_path)
         
-        # Save training curves every 10 epochs (overwrite the same file)
-        if (epoch + 1) % 10 == 0:
+        # Save training curves every 1 epochs (overwrite the same file)
+        if (epoch + 1) % 1 == 0:
             plot_training_curves(
                 train_losses, val_losses,
                 train_precisions, val_precisions,
@@ -607,7 +778,7 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     axes[1, 0].plot(val_recalls, label='Val Recall')
     axes[1, 0].set_xlabel('Epoch')
     axes[1, 0].set_ylabel('Recall')
-    axes[1, 0].setTitle('Recall')
+    axes[1, 0].set_title('Recall')
     axes[1, 0].legend()
     axes[1, 0].grid(True)
     
@@ -616,7 +787,7 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     axes[1, 1].plot(val_f1s, label='Val F1')
     axes[1, 1].set_xlabel('Epoch')
     axes[1, 1].set_ylabel('F1 Score')
-    axes[1, 1].setTitle('F1 Score')
+    axes[1, 1].set_title('F1 Score')
     axes[1, 1].legend()
     axes[1, 1].grid(True)
     

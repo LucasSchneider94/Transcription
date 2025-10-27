@@ -60,24 +60,8 @@ def resume_training():
         dataset, [train_size, val_size], generator=generator
     )
     
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=CONFIG['batch_size'], 
-        shuffle=True, 
-        num_workers=CONFIG['num_workers'],
-        pin_memory=CONFIG['pin_memory'],
-        prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
-        persistent_workers=CONFIG['persistent_workers'] if CONFIG['num_workers'] > 0 else False
-    )
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=CONFIG['batch_size'], 
-        shuffle=False, 
-        num_workers=CONFIG['num_workers'],
-        pin_memory=CONFIG['pin_memory'],
-        prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
-        persistent_workers=CONFIG['persistent_workers'] if CONFIG['num_workers'] > 0 else False
-    )
+    train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'], shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=0)
     
     # Create model and optimizer
     model = PianoTranscriptionModel(
@@ -163,8 +147,8 @@ def resume_training():
                 curves_save_path
             )
         
-        # Visualize predictions every 50 epochs
-        if (epoch + 1) % 50 == 0:
+        # Visualize predictions every 100 epochs
+        if (epoch + 1) % 100 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
     
