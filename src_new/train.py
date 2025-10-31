@@ -108,7 +108,8 @@ class SnippetDataset(Dataset):
     5. Optional time/frequency masking for robustness
     """
     def __init__(self, data_dir, snippet_frames, snippets_per_file=10, seed=42, 
-                 file_indices=None, augment=False, time_mask_param=30, freq_mask_param=20):
+                 file_indices=None, file_list=None, augment=False, time_mask_param=30, freq_mask_param=20,
+                 fixed_snippets=False):
         """
         Args:
             data_dir (str): Directory containing processed .npz and .npy files.
@@ -117,9 +118,11 @@ class SnippetDataset(Dataset):
             seed (int): Random seed for reproducible file selection (NOT snippet positions).
             file_indices (list, optional): List of file indices to include. If None, use all files.
                                           Use this to create train/val splits based on files, not snippets.
+            file_list (list, optional): Pre-filtered list of files to use. If provided, file_indices are applied to this list.
             augment (bool): Whether to apply data augmentation (time/freq masking).
             time_mask_param (int): Maximum number of consecutive time frames to mask.
             freq_mask_param (int): Maximum number of consecutive frequency bins to mask.
+            fixed_snippets (bool): If True, use fixed snippet positions (for overfitting tests). If False, random positions each epoch.
         """
         self.data_dir = data_dir
         self.snippet_frames = snippet_frames
@@ -128,12 +131,18 @@ class SnippetDataset(Dataset):
         self.augment = augment
         self.time_mask_param = time_mask_param
         self.freq_mask_param = freq_mask_param
+        self.fixed_snippets = fixed_snippets
         
         # Set random seed for reproducible FILE selection (not snippet positions)
         np.random.seed(seed)
         
         # Collect all valid files (SORTED for reproducibility)
-        all_files = sorted([f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz")])
+        if file_list is not None:
+            # Use provided file list (already filtered)
+            all_files = file_list
+        else:
+            # Collect from directory
+            all_files = sorted([f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz")])
         
         # Filter files if file_indices is provided (for train/val split)
         if file_indices is not None:
@@ -180,7 +189,10 @@ class SnippetDataset(Dataset):
         
         print(f"Loaded {num_files} audio files")
         print(f"Snippets per epoch: {total_snippets} ({self.snippets_per_file} per file)")
-        print(f"🎲 RANDOM snippet positions - different every epoch (prevents overfitting!)")
+        if fixed_snippets:
+            print(f"🔒 FIXED snippet positions - same data every epoch (overfitting mode!)")
+        else:
+            print(f"🎲 RANDOM snippet positions - different every epoch (prevents overfitting!)")
         if self.augment:
             print(f"🎨 Data augmentation ENABLED: Time masking (max {time_mask_param} frames), Freq masking (max {freq_mask_param} bins)")
         if file_indices is not None:
@@ -234,8 +246,12 @@ class SnippetDataset(Dataset):
         file_idx = idx // self.snippets_per_file
         file_info = self.file_list[file_idx]
         
-        # RANDOM snippet position - different every time!
-        start_frame = np.random.randint(0, file_info['max_start'] + 1)
+        if self.fixed_snippets:
+            # FIXED snippet position - same every time!
+            start_frame = (idx % self.snippets_per_file) * self.snippet_frames
+        else:
+            # RANDOM snippet position - different every time!
+            start_frame = np.random.randint(0, file_info['max_start'] + 1)
         end_frame = start_frame + self.snippet_frames
         
         # Memory-efficient: Load only the required snippet using memory mapping
@@ -550,6 +566,19 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     num_files = len(all_files)
     print(f"Total files found: {num_files}")
     
+    # Apply data_fraction to limit the dataset size
+    data_fraction = CONFIG.get('data_fraction', 1.0)
+    if data_fraction < 1.0:
+        num_files_to_use = max(1, int(num_files * data_fraction))
+        print(f"\n🎯 Using {data_fraction*100:.1f}% of data ({num_files_to_use}/{num_files} files)")
+        # Use deterministic selection (first N files after sorting)
+        np.random.seed(42)
+        selected_indices = np.random.permutation(num_files)[:num_files_to_use]
+        selected_indices = sorted(selected_indices)  # Keep sorted for reproducibility
+        all_files = [all_files[i] for i in selected_indices]
+        num_files = len(all_files)
+        np.random.seed(None)
+    
     # Split files into train/val (80/20)
     train_file_count = int(0.8 * num_files)
     val_file_count = num_files - train_file_count
@@ -566,16 +595,19 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     print(f"  Val files:   {val_file_count} ({val_file_count/num_files*100:.1f}%)")
     print(f"  Train and validation sets use COMPLETELY DIFFERENT files!")
     
-    # Create datasets with file-based filtering
+    # Create datasets with file-based filtering - need to map indices back to original all_files list
+    # Since we've already filtered all_files, the indices are for the filtered list
     train_dataset = SnippetDataset(
         data_dir, 
         CONFIG['snippet_frames'], 
         snippets_per_file=CONFIG.get('snippets_per_file', 10),
         seed=42,
         file_indices=train_file_indices,
-        augment=True,  # Enable augmentation for training
+        file_list=all_files,  # Pass the filtered file list
+        augment=CONFIG.get('use_time_masking', False) or CONFIG.get('use_freq_masking', False),  # Enable augmentation if masking enabled
         time_mask_param=CONFIG.get('time_mask_param', 30),
-        freq_mask_param=CONFIG.get('freq_mask_param', 20)
+        freq_mask_param=CONFIG.get('freq_mask_param', 20),
+        fixed_snippets=CONFIG.get('fixed_snippets', False)  # Use fixed snippets for overfitting test
     )
     val_dataset = SnippetDataset(
         data_dir, 
@@ -583,7 +615,9 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
         snippets_per_file=CONFIG.get('snippets_per_file', 10),
         seed=42,
         file_indices=val_file_indices,
-        augment=False  # No augmentation for validation
+        file_list=all_files,  # Pass the filtered file list
+        augment=False,  # No augmentation for validation
+        fixed_snippets=CONFIG.get('fixed_snippets', False)  # Use fixed snippets for overfitting test
     )
     
     print(f"\n📊 DATASET SUMMARY:")
@@ -595,7 +629,7 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size, 
-        shuffle=True, 
+        shuffle=CONFIG.get('shuffle_train', True),  # Use config setting for shuffle
         num_workers=CONFIG['num_workers'],
         pin_memory=CONFIG['pin_memory'],
         prefetch_factor=CONFIG['prefetch_factor'] if CONFIG['num_workers'] > 0 else None,
@@ -635,8 +669,29 @@ def train(data_dir, run_folder, num_epochs, batch_size, learning_rate):
     
     # Learning rate scheduler
     scheduler = None
+    warmup_scheduler = None
     if CONFIG.get('use_lr_scheduler', False):
-        if CONFIG['scheduler_type'] == 'reduce_on_plateau':
+        if CONFIG['scheduler_type'] == 'cosine_warmup':
+            # Warmup + Cosine Annealing
+            warmup_epochs = CONFIG.get('warmup_epochs', 10)
+            main_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=num_epochs - warmup_epochs,
+                eta_min=CONFIG['scheduler_min_lr']
+            )
+            warmup_scheduler = optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=0.1,  # Start at 10% of base LR
+                end_factor=1.0,    # Reach 100% at end of warmup
+                total_iters=warmup_epochs
+            )
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup_scheduler, main_scheduler],
+                milestones=[warmup_epochs]
+            )
+            print(f"Using Cosine Annealing with {warmup_epochs}-epoch warmup")
+        elif CONFIG['scheduler_type'] == 'reduce_on_plateau':
             scheduler = optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, 
                 mode='min',
