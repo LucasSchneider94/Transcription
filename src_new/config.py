@@ -13,14 +13,14 @@ CONFIG = {
     # Training parameters
     'snippet_duration': 2.0,
     'batch_size': 8,          # DOUBLED: More stable gradients, faster convergence
-    'learning_rate': 2e-4,     # REDUCED: Stepwise improvements show high LR was overshooting (was 5e-4)
+    'learning_rate': 8e-5,     # REDUCED: Stepwise improvements show high LR was overshooting (was 5e-4)
     'num_epochs': 1000,         # Enough for full convergence
     'hidden_size': 256,        # INCREASED: Model may be capacity-limited (was 256)
     'num_heads': 8,
     'num_layers': 4,           # INCREASED: More depth for complex patterns (was 4)
     'dropout': 0.1,            # REDUCED: Less regularization since we're not overfitting (was 0.3)
     'weight_decay': 5e-5,      # REDUCED: Less L2 penalty (was 1e-4)
-    'split_year_folder': "2008",
+    'split_year_folder': "2018",
     
     # Data augmentation settings
     'snippets_per_file': 20,   # REDUCED: Less randomness per epoch, more stability (was 30)
