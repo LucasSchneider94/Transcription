@@ -2,56 +2,60 @@ CONFIG = {
     'sample_rate': 48000,
     'roll_fps': 100,
     'num_keys': 88,
-    'n_mels': 88*3,
-    'n_fft': 2048,
+    'n_mels': 88 * 4,                       # 4 bins per key (352 total)
+    'n_fft': 4096,                          # Larger FFT for better freq resolution
     'plot_pngs': True,
     
     # Data paths
-    'data_dir': './processed_data',
-    'data_fraction': 1.0,      # FULL DATASET for proper training
+    'data_dir': './processed_data_17_18',
+    'data_fraction': 1.0,
     
-    # Training parameters
-    'snippet_duration': 2.0,
-    'batch_size': 8,          # DOUBLED: More stable gradients, faster convergence
-    'learning_rate': 8e-5,     # REDUCED: Stepwise improvements show high LR was overshooting (was 5e-4)
-    'num_epochs': 1000,         # Enough for full convergence
-    'hidden_size': 256,        # INCREASED: Model may be capacity-limited (was 256)
+    # Training parameters - OPTIMIZED FOR SPEED
+    'snippet_duration': 3.0,
+    'batch_size': 16,                       # DOUBLED: 8 → 16 for faster training
+    'learning_rate': 1e-4,
+    'num_epochs': 200,
+    'hidden_size': 256,
     'num_heads': 8,
-    'num_layers': 4,           # INCREASED: More depth for complex patterns (was 4)
-    'dropout': 0.1,            # REDUCED: Less regularization since we're not overfitting (was 0.3)
-    'weight_decay': 5e-5,      # REDUCED: Less L2 penalty (was 1e-4)
-    'split_year_folder': "2018",
+    'num_layers': 4,
+    'dropout': 0.2,
+    'weight_decay': 1e-4,
+    'split_year_folder': "2014",
     
-    # Data augmentation settings
-    'snippets_per_file': 20,   # REDUCED: Less randomness per epoch, more stability (was 30)
-    'use_time_masking': False, # Disabled - signals too delicate
+    # Data augmentation settings - MORE DATA PER EPOCH
+    'snippets_per_file': 30,                # TRIPLED: 10 → 30 for more data diversity
+    'use_time_masking': False,
     'time_mask_param': 30,
-    'use_freq_masking': False, # Disabled - only ~3 bins per key
+    'use_freq_masking': False,
     'freq_mask_param': 20,
     
     # Learning rate scheduler settings
     'use_lr_scheduler': True,
-    'scheduler_type': 'cosine_warmup',  # NEW: Warmup then smooth decay
-    'warmup_epochs': 5,        # REDUCED: Shorter warmup since starting LR is already conservative (was 10)
-    'scheduler_patience': 25,  # Patient - don't reduce too early
+    'scheduler_type': 'cosine_warmup',
+    'warmup_epochs': 10,
+    'scheduler_patience': 25,
     'scheduler_factor': 0.5,
     'scheduler_min_lr': 1e-6,
-    'scheduler_threshold': 5e-3,  # Tolerant of small fluctuations
+    'scheduler_threshold': 5e-3,
     
     # Loss function settings
-    'use_focal_loss': False,   # BCE works better based on your tests
+    'use_focal_loss': False,
     'focal_alpha': 0.25,
     'focal_gamma': 2.0,
     
-    # DataLoader optimization settings
-    'num_workers': 8,
+    # DataLoader optimization settings - OPTIMIZED FOR RAM
+    'num_workers': 12,                      # INCREASED: 8 → 12 for better parallelism
     'pin_memory': False,
-    'prefetch_factor': 2,
+    'prefetch_factor': 3,                   # INCREASED: 2 → 3 for better prefetching
     'persistent_workers': True,
+    'preload_into_ram': True,               # NEW: Pre-load entire dataset into RAM
     
-    # Training mode settings (for overfitting tests - DISABLED for normal training)
-    'fixed_snippets': False,   # DISABLED: Use random sampling for generalization
-    'shuffle_train': True,     # ENABLED: Shuffle for better training
+    # Training mode settings
+    'fixed_snippets': False,
+    'shuffle_train': True,
+    
+    # Ablation study option
+    'use_cnn_only': True,                  # NEW: Set to True to test without Transformer
 }
 
 # Derived constants - hop_length is calculated to ensure alignment

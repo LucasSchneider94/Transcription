@@ -9,10 +9,11 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
 import os
+import json
 from tqdm import tqdm
 
 from config import CONFIG, NUM_OUTPUTS
-from model import PianoTranscriptionModel
+from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly  # Import CNN-only model
 from dataset import SnippetDataset
 from utils import (
     get_next_run_folder,
@@ -22,6 +23,25 @@ from utils import (
     save_checkpoint,
     load_checkpoint
 )
+
+
+def save_config_to_run_folder(config, run_folder):
+    """Save the configuration to the run folder as JSON."""
+    config_path = os.path.join(run_folder, "config.json")
+    
+    # Create a serializable copy of config
+    config_dict = {}
+    for key, value in config.items():
+        # Convert non-serializable types to strings
+        if isinstance(value, (int, float, str, bool, list, dict, type(None))):
+            config_dict[key] = value
+        else:
+            config_dict[key] = str(value)
+    
+    with open(config_path, 'w') as f:
+        json.dump(config_dict, f, indent=4, sort_keys=True)
+    
+    print(f"Config saved to: {config_path}")
 
 
 def create_datasets_and_loaders(data_dir, config):
@@ -58,14 +78,16 @@ def create_datasets_and_loaders(data_dir, config):
     print(f"  Train: {train_count} files ({train_count/num_files*100:.1f}%)")
     print(f"  Val:   {val_count} files ({val_count/num_files*100:.1f}%)")
     
-    # Create datasets
+    # Create datasets with RAM preloading option
     train_dataset = SnippetDataset(
         data_dir,
         config['snippet_frames'],
         snippets_per_file=config.get('snippets_per_file', 20),
         file_indices=train_indices,
         file_list=all_files,
-        seed=42
+        seed=42,
+        fixed_snippets=config.get('fixed_snippets', False),
+        preload_into_ram=config.get('preload_into_ram', True)  # NEW: RAM preloading
     )
     
     val_dataset = SnippetDataset(
@@ -74,7 +96,9 @@ def create_datasets_and_loaders(data_dir, config):
         snippets_per_file=config.get('snippets_per_file', 20),
         file_indices=val_indices,
         file_list=all_files,
-        seed=42
+        seed=42,
+        fixed_snippets=config.get('fixed_snippets', False),
+        preload_into_ram=config.get('preload_into_ram', True)  # NEW: RAM preloading
     )
     
     print(f"\nDataset summary:")
@@ -85,7 +109,7 @@ def create_datasets_and_loaders(data_dir, config):
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
-        shuffle=True,
+        shuffle=config.get('shuffle_train', True),  # Use config setting
         num_workers=config.get('num_workers', 0),
         pin_memory=config.get('pin_memory', False),
         prefetch_factor=config.get('prefetch_factor', 2) if config.get('num_workers', 0) > 0 else None,
@@ -227,15 +251,26 @@ def train(data_dir, run_folder, config):
     # Create datasets and loaders
     train_loader, val_loader = create_datasets_and_loaders(data_dir, config)
     
-    # Create model
-    model = PianoTranscriptionModel(
-        n_mels=config['n_mels'],
-        hidden_size=config['hidden_size'],
-        num_heads=config['num_heads'],
-        num_layers=config['num_layers'],
-        num_outputs=NUM_OUTPUTS,
-        dropout=config['dropout']
-    ).to(device)
+    # Create model - choose based on config
+    if config.get('use_cnn_only', False):
+        print("\n" + "="*80)
+        print("ABLATION STUDY: Using CNN-only model (no Transformer)")
+        print("="*80 + "\n")
+        model = PianoTranscriptionModelCNNOnly(
+            n_mels=config['n_mels'],
+            hidden_size=config['hidden_size'],
+            num_outputs=NUM_OUTPUTS,
+            dropout=config['dropout']
+        ).to(device)
+    else:
+        model = PianoTranscriptionModel(
+            n_mels=config['n_mels'],
+            hidden_size=config['hidden_size'],
+            num_heads=config['num_heads'],
+            num_layers=config['num_layers'],
+            num_outputs=NUM_OUTPUTS,
+            dropout=config['dropout']
+        ).to(device)
     
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     
@@ -272,6 +307,9 @@ def train(data_dir, run_folder, config):
         val_losses = checkpoint['val_losses']
         train_metrics = checkpoint['train_metrics']
         val_metrics = checkpoint['val_metrics']
+    
+    # Save config to run folder
+    save_config_to_run_folder(config, run_folder)
     
     # Training loop
     print(f"\nStarting training from epoch {start_epoch + 1}\n")

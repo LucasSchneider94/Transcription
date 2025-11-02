@@ -2,35 +2,36 @@ import torch
 import torch.nn as nn
 import math
 
-class ConvolutionalFeatureExtractor(nn.Module):
+class ConvolutionalFeatureExtractorLegacy(nn.Module):
     """
-    Convolutional layers to extract local features from spectrograms.
+    LEGACY: Old CNN architecture for loading checkpoints from training_run_001-008.
+    Use this for inference on old models.
     """
     def __init__(self, n_mels, hidden_size):
-        super(ConvolutionalFeatureExtractor, self).__init__()
+        super(ConvolutionalFeatureExtractorLegacy, self).__init__()
         
         self.conv_layers = nn.Sequential(
-            # First conv block
+            # First conv block - OLD SIZE
             nn.Conv2d(1, 32, kernel_size=(3, 3), padding=(1, 1)),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Reduce frequency dimension only
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
             
-            # Second conv block
+            # Second conv block - OLD SIZE
             nn.Conv2d(32, 64, kernel_size=(3, 3), padding=(1, 1)),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Reduce frequency dimension only
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
             
-            # Third conv block
+            # Third conv block - OLD SIZE
             nn.Conv2d(64, 128, kernel_size=(3, 3), padding=(1, 1)),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),  # Reduce frequency dimension only
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
         )
         
         # Calculate output feature size after conv layers
-        self.feature_size = 128 * (n_mels // 8)  # After 3 pooling layers with stride 2
+        self.feature_size = 128 * (n_mels // 8)  # After 3 pooling layers
         self.projection = nn.Linear(self.feature_size, hidden_size)
         
     def forward(self, x):
@@ -39,11 +40,63 @@ class ConvolutionalFeatureExtractor(nn.Module):
         
         # Reshape: (batch_size, time_frames, 128 * n_mels//8)
         batch_size, channels, freq, time = x.size()
-        x = x.permute(0, 3, 1, 2).contiguous()  # (batch_size, time_frames, channels, freq)
-        x = x.view(batch_size, time, -1)  # (batch_size, time_frames, channels * freq)
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.view(batch_size, time, -1)
         
         # Project to hidden_size
-        x = self.projection(x)  # (batch_size, time_frames, hidden_size)
+        x = self.projection(x)
+        return x
+
+
+class ConvolutionalFeatureExtractor(nn.Module):
+    """
+    Convolutional layers to extract local features from spectrograms.
+    Increased capacity for better feature learning.
+    """
+    def __init__(self, n_mels, hidden_size):
+        super(ConvolutionalFeatureExtractor, self).__init__()
+        
+        self.conv_layers = nn.Sequential(
+            # First conv block - INCREASED channels
+            nn.Conv2d(1, 64, kernel_size=(3, 3), padding=(1, 1)),  # 32 → 64
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            
+            # Second conv block - INCREASED channels
+            nn.Conv2d(64, 128, kernel_size=(3, 3), padding=(1, 1)),  # 64 → 128
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            
+            # Third conv block - INCREASED channels
+            nn.Conv2d(128, 256, kernel_size=(3, 3), padding=(1, 1)),  # 128 → 256
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+            
+            # NEW: Fourth conv block for more depth
+            nn.Conv2d(256, 256, kernel_size=(3, 3), padding=(1, 1)),
+            nn.BatchNorm2d(256),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+        )
+        
+        # Calculate output feature size after conv layers
+        self.feature_size = 256 * (n_mels // 16)  # After 4 pooling layers (was // 8)
+        self.projection = nn.Linear(self.feature_size, hidden_size)
+        
+    def forward(self, x):
+        # x shape: (batch_size, 1, n_mels, time_frames)
+        x = self.conv_layers(x)  # (batch_size, 256, n_mels//16, time_frames)
+        
+        # Reshape: (batch_size, time_frames, 256 * n_mels//16)
+        batch_size, channels, freq, time = x.size()
+        x = x.permute(0, 3, 1, 2).contiguous()
+        x = x.view(batch_size, time, -1)
+        
+        # Project to hidden_size
+        x = self.projection(x)
         return x
 
 
@@ -68,6 +121,44 @@ class PositionalEncoding(nn.Module):
         # x shape: (batch_size, seq_len, hidden_size)
         x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
+
+
+class PianoTranscriptionModelLegacy(nn.Module):
+    """
+    LEGACY: Model for loading old checkpoints (training_run_001-008).
+    Uses old CNN architecture (32→64→128, 3 layers).
+    """
+    def __init__(self, n_mels=128, hidden_size=256, num_heads=8, num_layers=4, 
+                 num_outputs=91, dropout=0.1):
+        super(PianoTranscriptionModelLegacy, self).__init__()
+        
+        # OLD Convolutional feature extractor
+        self.feature_extractor = ConvolutionalFeatureExtractorLegacy(n_mels, hidden_size)
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(hidden_size, dropout=dropout)
+        
+        # Transformer encoder layers
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_size,
+            nhead=num_heads,
+            dim_feedforward=hidden_size * 4,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # Output projection
+        self.output_projection = nn.Linear(hidden_size, num_outputs)
+        
+    def forward(self, x):
+        """Forward pass."""
+        x = self.feature_extractor(x)
+        x = self.pos_encoder(x)
+        x = self.transformer(x)
+        x = self.output_projection(x)
+        x = torch.sigmoid(x)
+        return x
 
 
 class PianoTranscriptionModel(nn.Module):
@@ -125,10 +216,55 @@ class PianoTranscriptionModel(nn.Module):
         return x
 
 
+class PianoTranscriptionModelCNNOnly(nn.Module):
+    """
+    CNN-only model (no Transformer) for ablation study.
+    Frame-by-frame prediction without temporal context.
+    """
+    def __init__(self, n_mels=128, hidden_size=256, num_outputs=91, dropout=0.1):
+        super(PianoTranscriptionModelCNNOnly, self).__init__()
+        
+        # Convolutional feature extractor
+        self.feature_extractor = ConvolutionalFeatureExtractor(n_mels, hidden_size)
+        
+        # Direct output projection (no transformer)
+        self.output_projection = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, num_outputs)
+        )
+        
+    def forward(self, x):
+        """
+        Forward pass - frame-by-frame prediction.
+        
+        Args:
+            x: Input spectrogram (batch_size, 1, n_mels, time_frames)
+            
+        Returns:
+            Output piano roll predictions (batch_size, time_frames, num_outputs)
+        """
+        # Extract features with CNN
+        x = self.feature_extractor(x)  # (batch_size, time_frames, hidden_size)
+        
+        # Direct projection to outputs (no temporal modeling)
+        x = self.output_projection(x)  # (batch_size, time_frames, num_outputs)
+        
+        # Apply sigmoid for binary predictions
+        x = torch.sigmoid(x)
+        
+        return x
+
+
 if __name__ == "__main__":
     from config import CONFIG, NUM_OUTPUTS
     
-    # Test the model
+    # Test both models
+    print("="*80)
+    print("FULL MODEL (CNN + Transformer)")
+    print("="*80)
     model = PianoTranscriptionModel(
         n_mels=CONFIG['n_mels'],
         hidden_size=CONFIG['hidden_size'],
@@ -148,3 +284,28 @@ if __name__ == "__main__":
     print(f"Input shape: {dummy_input.shape}")
     print(f"Output shape: {output.shape}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    print("\n" + "="*80)
+    print("CNN-ONLY MODEL (Ablation Study)")
+    print("="*80)
+    model_cnn = PianoTranscriptionModelCNNOnly(
+        n_mels=CONFIG['n_mels'],
+        hidden_size=CONFIG['hidden_size'],
+        num_outputs=NUM_OUTPUTS,
+        dropout=CONFIG['dropout']
+    )
+    
+    output_cnn = model_cnn(dummy_input)
+    print(f"Input shape: {dummy_input.shape}")
+    print(f"Output shape: {output_cnn.shape}")
+    print(f"Model parameters: {sum(p.numel() for p in model_cnn.parameters()):,}")
+    
+    print("\n" + "="*80)
+    print("COMPARISON")
+    print("="*80)
+    full_params = sum(p.numel() for p in model.parameters())
+    cnn_params = sum(p.numel() for p in model_cnn.parameters())
+    print(f"Full model: {full_params:,} parameters")
+    print(f"CNN-only: {cnn_params:,} parameters")
+    print(f"Transformer overhead: {full_params - cnn_params:,} parameters ({(full_params - cnn_params) / full_params * 100:.1f}%)")
+    print("="*80)
