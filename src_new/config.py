@@ -10,9 +10,9 @@ CONFIG = {
     'data_dir': './processed_data_17_18',
     'data_fraction': 1.0,
     
-    # Training parameters - OPTIMIZED FOR SPEED
+    # Training parameters - BALANCED FOR MEMORY
     'snippet_duration': 3.0,
-    'batch_size': 16,                       # DOUBLED: 8 → 16 for faster training
+    'batch_size': 16,
     'learning_rate': 1e-4,
     'num_epochs': 200,
     'hidden_size': 256,
@@ -20,10 +20,10 @@ CONFIG = {
     'num_layers': 4,
     'dropout': 0.2,
     'weight_decay': 1e-4,
-    'split_year_folder': "2014",
+    'split_year_folder': "2018",
     
-    # Data augmentation settings - MORE DATA PER EPOCH
-    'snippets_per_file': 30,                # TRIPLED: 10 → 30 for more data diversity
+    # Data augmentation settings - INCREASED BUT REASONABLE
+    'snippets_per_file': 50,
     'use_time_masking': False,
     'time_mask_param': 30,
     'use_freq_masking': False,
@@ -32,8 +32,8 @@ CONFIG = {
     # Learning rate scheduler settings
     'use_lr_scheduler': True,
     'scheduler_type': 'cosine_warmup',
-    'warmup_epochs': 10,
-    'scheduler_patience': 25,
+    'warmup_epochs': 5,
+    'scheduler_patience': 5,
     'scheduler_factor': 0.5,
     'scheduler_min_lr': 1e-6,
     'scheduler_threshold': 5e-3,
@@ -43,19 +43,19 @@ CONFIG = {
     'focal_alpha': 0.25,
     'focal_gamma': 2.0,
     
-    # DataLoader optimization settings - OPTIMIZED FOR RAM
-    'num_workers': 12,                      # INCREASED: 8 → 12 for better parallelism
+    # DataLoader optimization settings - MEMORY CONSCIOUS
+    'num_workers': 12,
     'pin_memory': False,
-    'prefetch_factor': 3,                   # INCREASED: 2 → 3 for better prefetching
+    'prefetch_factor': 2,                   # Back to 2 from 3
     'persistent_workers': True,
-    'preload_into_ram': True,               # NEW: Pre-load entire dataset into RAM
+    'preload_into_ram': False,              # DISABLED: Too much memory (31GB)
     
     # Training mode settings
     'fixed_snippets': False,
     'shuffle_train': True,
     
     # Ablation study option
-    'use_cnn_only': True,                  # NEW: Set to True to test without Transformer
+    'use_cnn_only': False,                  # Set to True to test without Transformer
 }
 
 # Derived constants - hop_length is calculated to ensure alignment
