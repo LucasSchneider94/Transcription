@@ -13,8 +13,8 @@ import json
 from tqdm import tqdm
 
 from config import CONFIG, NUM_OUTPUTS
-from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly  # Import CNN-only model
-from dataset import SnippetDataset
+from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly
+from dataset import PianoTranscriptionDataset
 from utils import (
     get_next_run_folder,
     compute_metrics,
@@ -23,6 +23,127 @@ from utils import (
     save_checkpoint,
     load_checkpoint
 )
+
+
+class TemporalConsistencyLoss(nn.Module):
+    """
+    Enforces temporal consistency between onset, offset, and frame predictions.
+    
+    Penalizes:
+    1. Frames active before any onset occurs
+    2. Frames active after offset without new onset
+    3. Offsets occurring without active frames
+    """
+    def __init__(self):
+        super(TemporalConsistencyLoss, self).__init__()
+    
+    def forward(self, onset_logits, offset_logits, frame_logits):
+        """
+        Args:
+            onset_logits: (batch, time, 88) - raw logits
+            offset_logits: (batch, time, 88) - raw logits
+            frame_logits: (batch, time, 88) - raw logits
+        
+        Returns:
+            consistency_loss: scalar tensor
+        """
+        # Apply sigmoid to get probabilities
+        onset_prob = torch.sigmoid(onset_logits)
+        offset_prob = torch.sigmoid(offset_logits)
+        frame_prob = torch.sigmoid(frame_logits)
+        
+        batch_size, time_steps, num_keys = onset_prob.shape
+        
+        # Compute cumulative onset probability (has there been an onset up to this point?)
+        # Use cummax to propagate onsets forward in time
+        cumulative_onset, _ = torch.cummax(onset_prob, dim=1)
+        
+        # Loss 1: Penalize frames active before first onset
+        # Frames should be 0 where cumulative_onset is low
+        frame_before_onset_loss = torch.mean(
+            frame_prob * (1 - cumulative_onset)
+        )
+        
+        # Loss 2: Penalize frames active after offset
+        # Create "note is finished" signal by accumulating offsets
+        cumulative_offset, _ = torch.cummax(offset_prob, dim=1)
+        # Note is finished if offset happened and no new onset occurred after
+        note_finished = cumulative_offset * (1 - onset_prob)
+        # Penalize frames that are active when note is finished
+        frame_after_offset_loss = torch.mean(
+            frame_prob * note_finished
+        )
+        
+        # Loss 3: Penalize offsets without active frames
+        # If offset is predicted, frames should be active (or have been recently)
+        offset_without_frame_loss = torch.mean(
+            offset_prob * (1 - frame_prob)
+        )
+        
+        # Combine losses
+        total_consistency_loss = (
+            frame_before_onset_loss + 
+            frame_after_offset_loss + 
+            offset_without_frame_loss
+        )
+        
+        return total_consistency_loss, {
+            'frame_before_onset': frame_before_onset_loss.item(),
+            'frame_after_offset': frame_after_offset_loss.item(),
+            'offset_without_frame': offset_without_frame_loss.item()
+        }
+
+
+class MultiTaskLoss(nn.Module):
+    """
+    Multi-task loss for onset, offset, and frame prediction.
+    Following "Onsets & Frames" approach with weighted BCE loss.
+    """
+    def __init__(self, onset_weight=4.0, offset_weight=1.0, frame_weight=1.0, 
+                 consistency_weight=0.5):
+        super(MultiTaskLoss, self).__init__()
+        self.onset_weight = onset_weight
+        self.offset_weight = offset_weight
+        self.frame_weight = frame_weight
+        self.consistency_weight = consistency_weight
+        self.bce = nn.BCEWithLogitsLoss(reduction='mean')
+        self.consistency_loss = TemporalConsistencyLoss()
+    
+    def forward(self, predictions, targets):
+        """
+        Args:
+            predictions: Dict with 'onset', 'offset', 'frame' logits
+            targets: Dict with 'onset', 'offset', 'frame' binary labels
+        
+        Returns:
+            Total weighted loss and individual losses
+        """
+        onset_loss = self.bce(predictions['onset'], targets['onset'])
+        offset_loss = self.bce(predictions['offset'], targets['offset'])
+        frame_loss = self.bce(predictions['frame'], targets['frame'])
+        
+        # Compute temporal consistency loss
+        consistency_loss, consistency_dict = self.consistency_loss(
+            predictions['onset'],
+            predictions['offset'],
+            predictions['frame']
+        )
+        
+        total_loss = (self.onset_weight * onset_loss + 
+                     self.offset_weight * offset_loss + 
+                     self.frame_weight * frame_loss +
+                     self.consistency_weight * consistency_loss)
+        
+        return total_loss, {
+            'onset_loss': onset_loss.item(),
+            'offset_loss': offset_loss.item(),
+            'frame_loss': frame_loss.item(),
+            'consistency_loss': consistency_loss.item(),
+            'frame_before_onset': consistency_dict['frame_before_onset'],
+            'frame_after_offset': consistency_dict['frame_after_offset'],
+            'offset_without_frame': consistency_dict['offset_without_frame'],
+            'total_loss': total_loss.item()
+        }
 
 
 def save_config_to_run_folder(config, run_folder):
@@ -79,7 +200,7 @@ def create_datasets_and_loaders(data_dir, config):
     print(f"  Val:   {val_count} files ({val_count/num_files*100:.1f}%)")
     
     # Create datasets with RAM preloading option
-    train_dataset = SnippetDataset(
+    train_dataset = PianoTranscriptionDataset(
         data_dir,
         config['snippet_frames'],
         snippets_per_file=config.get('snippets_per_file', 20),
@@ -90,7 +211,7 @@ def create_datasets_and_loaders(data_dir, config):
         preload_into_ram=config.get('preload_into_ram', True)  # NEW: RAM preloading
     )
     
-    val_dataset = SnippetDataset(
+    val_dataset = PianoTranscriptionDataset(
         data_dir,
         config['snippet_frames'],
         snippets_per_file=config.get('snippets_per_file', 20),
@@ -183,61 +304,131 @@ def create_scheduler(optimizer, config, num_epochs):
     return scheduler
 
 
+def compute_frame_metrics(predictions, targets, threshold=0.5):
+    """
+    Compute frame-level precision, recall, and F1 score.
+    
+    Args:
+        predictions: Frame predictions (batch, time, 88) - logits or probabilities
+        targets: Frame targets (batch, time, 88) - binary
+        threshold: Threshold for binary classification
+    
+    Returns:
+        dict: Metrics dictionary with precision, recall, f1
+    """
+    # Apply sigmoid if needed and threshold
+    if predictions.min() < 0 or predictions.max() > 1:
+        predictions = torch.sigmoid(predictions)
+    
+    pred_binary = (predictions > threshold).float()
+    
+    # Compute true positives, false positives, false negatives
+    tp = (pred_binary * targets).sum().item()
+    fp = (pred_binary * (1 - targets)).sum().item()
+    fn = ((1 - pred_binary) * targets).sum().item()
+    
+    # Compute metrics
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return {
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+
+
 def train_epoch(model, dataloader, criterion, optimizer, device):
     """Train for one epoch."""
     model.train()
-    total_loss = 0.0
-    all_predictions = []
-    all_targets = []
+    total_losses = {'onset_loss': 0, 'offset_loss': 0, 'frame_loss': 0, 'consistency_loss': 0, 'total_loss': 0}
+    total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
     
-    for spectrograms, piano_rolls in tqdm(dataloader, desc="Training"):
-        spectrograms = spectrograms.to(device)
-        piano_rolls = piano_rolls.to(device)
+    pbar = tqdm(dataloader, desc="Training")
+    for batch_idx, batch in enumerate(pbar):
+        # Move data to device
+        spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
+        onset = batch['onset'].to(device)
+        offset = batch['offset'].to(device)
+        frame = batch['frame'].to(device)
         
-        predictions = model(spectrograms)
-        loss = criterion(predictions, piano_rolls)
-        
+        # Forward pass
         optimizer.zero_grad()
+        predictions = model(spectrogram)
+        
+        # Compute loss
+        targets = {'onset': onset, 'offset': offset, 'frame': frame}
+        loss, loss_dict = criterion(predictions, targets)
+        
+        # Backward pass
         loss.backward()
         optimizer.step()
         
-        total_loss += loss.item()
-        all_predictions.append(predictions.detach())
-        all_targets.append(piano_rolls.detach())
+        # Compute frame metrics
+        with torch.no_grad():
+            metrics = compute_frame_metrics(predictions['frame'], frame)
+        
+        # Accumulate losses and metrics
+        for key in total_losses:
+            total_losses[key] += loss_dict[key]
+        for key in total_metrics:
+            total_metrics[key] += metrics[key]
+        
+        # Update progress bar
+        pbar.set_postfix({
+            'loss': f"{loss_dict['total_loss']:.4f}",
+            'f1': f"{metrics['f1']:.3f}"
+        })
     
-    avg_loss = total_loss / len(dataloader)
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-    metrics = compute_metrics(all_predictions, all_targets)
+    # Average losses and metrics
+    num_batches = len(dataloader)
+    for key in total_losses:
+        total_losses[key] /= num_batches
+    for key in total_metrics:
+        total_metrics[key] /= num_batches
     
-    return avg_loss, metrics
+    return total_losses, total_metrics
 
 
 def validate(model, dataloader, criterion, device):
     """Validate the model."""
     model.eval()
-    total_loss = 0.0
-    all_predictions = []
-    all_targets = []
+    total_losses = {'onset_loss': 0, 'offset_loss': 0, 'frame_loss': 0, 'consistency_loss': 0, 'total_loss': 0}
+    total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
     
     with torch.no_grad():
-        for spectrograms, piano_rolls in tqdm(dataloader, desc="Validating"):
-            spectrograms = spectrograms.to(device)
-            piano_rolls = piano_rolls.to(device)
+        for batch in tqdm(dataloader, desc="Validation"):
+            # Move data to device
+            spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
+            onset = batch['onset'].to(device)
+            offset = batch['offset'].to(device)
+            frame = batch['frame'].to(device)
             
-            predictions = model(spectrograms)
-            loss = criterion(predictions, piano_rolls)
+            # Forward pass
+            predictions = model(spectrogram)
             
-            total_loss += loss.item()
-            all_predictions.append(predictions)
-            all_targets.append(piano_rolls)
+            # Compute loss
+            targets = {'onset': onset, 'offset': offset, 'frame': frame}
+            loss, loss_dict = criterion(predictions, targets)
+            
+            # Compute frame metrics
+            metrics = compute_frame_metrics(predictions['frame'], frame)
+            
+            # Accumulate losses and metrics
+            for key in total_losses:
+                total_losses[key] += loss_dict[key]
+            for key in total_metrics:
+                total_metrics[key] += metrics[key]
     
-    avg_loss = total_loss / len(dataloader)
-    all_predictions = torch.cat(all_predictions, dim=0)
-    all_targets = torch.cat(all_targets, dim=0)
-    metrics = compute_metrics(all_predictions, all_targets)
+    # Average losses and metrics
+    num_batches = len(dataloader)
+    for key in total_losses:
+        total_losses[key] /= num_batches
+    for key in total_metrics:
+        total_metrics[key] /= num_batches
     
-    return avg_loss, metrics
+    return total_losses, total_metrics
 
 
 def train(data_dir, run_folder, config):
@@ -264,18 +455,30 @@ def train(data_dir, run_folder, config):
         ).to(device)
     else:
         model = PianoTranscriptionModel(
-            n_mels=config['n_mels'],
-            hidden_size=config['hidden_size'],
+            input_features=config['n_mels'],
+            num_keys=config['num_keys'],
+            transformer_dim=config['hidden_size'],
             num_heads=config['num_heads'],
             num_layers=config['num_layers'],
-            num_outputs=NUM_OUTPUTS,
             dropout=config['dropout']
         ).to(device)
     
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Loss and optimizer
-    criterion = nn.BCELoss()
+    # Loss and optimizer - use config weights
+    criterion = MultiTaskLoss(
+        onset_weight=config.get('onset_weight', 4.0),
+        offset_weight=config.get('offset_weight', 1.0),
+        frame_weight=config.get('frame_weight', 1.0),
+        consistency_weight=config.get('consistency_weight', 0.5)
+    )
+    
+    print(f"\nLoss weights:")
+    print(f"  Onset: {config.get('onset_weight', 4.0)}")
+    print(f"  Offset: {config.get('offset_weight', 1.0)}")
+    print(f"  Frame: {config.get('frame_weight', 1.0)}")
+    print(f"  Consistency: {config.get('consistency_weight', 0.5)}")
+    
     optimizer = optim.Adam(
         model.parameters(),
         lr=config['learning_rate'],
@@ -321,30 +524,32 @@ def train(data_dir, run_folder, config):
         train_loss, train_metric = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_metric = validate(model, val_loader, criterion, device)
         
-        train_losses.append(train_loss)
-        val_losses.append(val_loss)
+        train_losses.append(train_loss['total_loss'])
+        val_losses.append(val_loss['total_loss'])
         train_metrics.append(train_metric)
         val_metrics.append(val_metric)
         
         # Print stats
-        print(f"Loss - Train: {train_loss:.4f}, Val: {val_loss:.4f}")
-        print(f"Train - P: {train_metric['precision']:.4f}, "
-              f"R: {train_metric['recall']:.4f}, F1: {train_metric['f1']:.4f}")
-        print(f"Val   - P: {val_metric['precision']:.4f}, "
-              f"R: {val_metric['recall']:.4f}, F1: {val_metric['f1']:.4f}")
+        print(f"Loss - Train: {train_loss['total_loss']:.4f}, Val: {val_loss['total_loss']:.4f}")
+        print(f"Train - Onset: {train_loss['onset_loss']:.4f}, "
+              f"Offset: {train_loss['offset_loss']:.4f}, Frame: {train_loss['frame_loss']:.4f}, Consistency: {train_loss['consistency_loss']:.4f}")
+        print(f"Val   - Onset: {val_loss['onset_loss']:.4f}, "
+              f"Offset: {val_loss['offset_loss']:.4f}, Frame: {val_loss['frame_loss']:.4f}, Consistency: {val_loss['consistency_loss']:.4f}")
+        print(f"Train - Precision: {train_metric['precision']:.4f}, Recall: {train_metric['recall']:.4f}, F1: {train_metric['f1']:.4f}")
+        print(f"Val   - Precision: {val_metric['precision']:.4f}, Recall: {val_metric['recall']:.4f}, F1: {val_metric['f1']:.4f}")
         
         # Update scheduler
         if scheduler is not None:
             if config['scheduler_type'] == 'reduce_on_plateau':
-                scheduler.step(val_loss)
+                scheduler.step(val_loss['total_loss'])
             else:
                 scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
             print(f"LR: {current_lr:.2e}")
         
         # Save best model
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
+        if val_loss['total_loss'] < best_val_loss:
+            best_val_loss = val_loss['total_loss']
             torch.save(model.state_dict(), model_path)
             print(f"✓ Best model saved")
         

@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
+from config import CONFIG
 
 class ConvolutionalFeatureExtractorLegacy(nn.Module):
     """
@@ -163,57 +165,68 @@ class PianoTranscriptionModelLegacy(nn.Module):
 
 class PianoTranscriptionModel(nn.Module):
     """
-    Hybrid model: CNN for local feature extraction + Transformer for temporal modeling.
+    Piano transcription model with CNN-Transformer architecture.
+    Outputs three heads: onset, offset, and frame predictions.
     """
-    def __init__(self, n_mels=128, hidden_size=256, num_heads=8, num_layers=4, 
-                 num_outputs=91, dropout=0.1):
+    def __init__(self, 
+                 input_features=CONFIG['n_mels'],
+                 num_keys=CONFIG['num_keys'],
+                 cnn_channels=[32, 64, 128],
+                 transformer_dim=256,
+                 num_heads=8,
+                 num_layers=6,
+                 dropout=0.1):
         super(PianoTranscriptionModel, self).__init__()
         
         # Convolutional feature extractor
-        self.feature_extractor = ConvolutionalFeatureExtractor(n_mels, hidden_size)
+        self.feature_extractor = ConvolutionalFeatureExtractor(input_features, transformer_dim)
         
         # Positional encoding
-        self.pos_encoder = PositionalEncoding(hidden_size, dropout=dropout)
+        self.pos_encoder = PositionalEncoding(transformer_dim, dropout=dropout)
         
         # Transformer encoder layers
         encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size,
+            d_model=transformer_dim,
             nhead=num_heads,
-            dim_feedforward=hidden_size * 4,
+            dim_feedforward=transformer_dim * 4,
             dropout=dropout,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Output projection
-        self.output_projection = nn.Linear(hidden_size, num_outputs)
+        # Three output heads following "Onsets & Frames" approach
+        self.onset_head = nn.Linear(transformer_dim, num_keys)
+        self.offset_head = nn.Linear(transformer_dim, num_keys)
+        self.frame_head = nn.Linear(transformer_dim, num_keys)
         
     def forward(self, x):
         """
-        Forward pass.
-        
         Args:
-            x: Input spectrogram (batch_size, 1, n_mels, time_frames)
+            x: Input spectrogram (batch, freq, time)
             
         Returns:
-            Output piano roll predictions (batch_size, time_frames, num_outputs)
+            Dictionary with 'onset', 'offset', 'frame' predictions
+            Each shape: (batch, time, num_keys)
         """
         # Extract features with CNN
-        x = self.feature_extractor(x)  # (batch_size, time_frames, hidden_size)
+        x = self.feature_extractor(x)  # (batch_size, time_frames, transformer_dim)
         
         # Add positional encoding
-        x = self.pos_encoder(x)  # (batch_size, time_frames, hidden_size)
+        x = self.pos_encoder(x)  # (batch_size, time_frames, transformer_dim)
         
         # Transformer encoding
-        x = self.transformer(x)  # (batch_size, time_frames, hidden_size)
+        x = self.transformer(x)  # (batch_size, time_frames, transformer_dim)
         
-        # Output projection
-        x = self.output_projection(x)  # (batch_size, time_frames, num_outputs)
+        # Apply three output heads
+        onset_logits = self.onset_head(x)  # (batch, time, num_keys)
+        offset_logits = self.offset_head(x)  # (batch, time, num_keys)
+        frame_logits = self.frame_head(x)  # (batch, time, num_keys)
         
-        # Apply sigmoid for binary predictions
-        x = torch.sigmoid(x)
-        
-        return x
+        return {
+            'onset': onset_logits,
+            'offset': offset_logits,
+            'frame': frame_logits
+        }
 
 
 class PianoTranscriptionModelCNNOnly(nn.Module):
@@ -266,11 +279,12 @@ if __name__ == "__main__":
     print("FULL MODEL (CNN + Transformer)")
     print("="*80)
     model = PianoTranscriptionModel(
-        n_mels=CONFIG['n_mels'],
-        hidden_size=CONFIG['hidden_size'],
+        input_features=CONFIG['n_mels'],
+        num_keys=CONFIG['num_keys'],
+        cnn_channels=[32, 64, 128],
+        transformer_dim=CONFIG['hidden_size'],
         num_heads=CONFIG['num_heads'],
         num_layers=CONFIG['num_layers'],
-        num_outputs=NUM_OUTPUTS,
         dropout=CONFIG['dropout']
     )
     
@@ -282,7 +296,7 @@ if __name__ == "__main__":
     # Forward pass
     output = model(dummy_input)
     print(f"Input shape: {dummy_input.shape}")
-    print(f"Output shape: {output.shape}")
+    print(f"Output shapes: onset={output['onset'].shape}, offset={output['offset'].shape}, frame={output['frame'].shape}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     print("\n" + "="*80)

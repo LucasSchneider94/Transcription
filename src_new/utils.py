@@ -87,61 +87,69 @@ def visualize_predictions(model, dataloader, device, save_path):
 
 def plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, save_path):
     """
-    Plot training curves.
+    Plot training and validation losses and metrics.
     
     Args:
-        train_losses, val_losses: Lists of loss values
-        train_metrics, val_metrics: Lists of dicts with 'precision', 'recall', 'f1'
+        train_losses: List of training losses per epoch
+        val_losses: List of validation losses per epoch
+        train_metrics: List of training metrics dicts per epoch
+        val_metrics: List of validation metrics dicts per epoch
         save_path: Path to save the plot
     """
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    epochs = range(1, len(train_losses) + 1)
     
-    # Extract metrics
-    train_precisions = [m['precision'] for m in train_metrics]
-    train_recalls = [m['recall'] for m in train_metrics]
-    train_f1s = [m['f1'] for m in train_metrics]
-    val_precisions = [m['precision'] for m in val_metrics]
-    val_recalls = [m['recall'] for m in val_metrics]
-    val_f1s = [m['f1'] for m in val_metrics]
+    # Extract metrics from dicts
+    train_precision = [m['precision'] for m in train_metrics]
+    train_recall = [m['recall'] for m in train_metrics]
+    train_f1 = [m['f1'] for m in train_metrics]
     
-    # Loss
-    axes[0, 0].plot(train_losses, label='Train')
-    axes[0, 0].plot(val_losses, label='Val')
+    val_precision = [m['precision'] for m in val_metrics]
+    val_recall = [m['recall'] for m in val_metrics]
+    val_f1 = [m['f1'] for m in val_metrics]
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    
+    # Plot 1: Loss
+    axes[0, 0].plot(epochs, train_losses, 'b-', label='Train Loss', linewidth=2)
+    axes[0, 0].plot(epochs, val_losses, 'r-', label='Val Loss', linewidth=2)
     axes[0, 0].set_xlabel('Epoch')
     axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].set_title('Loss')
+    axes[0, 0].set_title('Training and Validation Loss')
     axes[0, 0].legend()
-    axes[0, 0].grid(True)
+    axes[0, 0].grid(True, alpha=0.3)
     
-    # Precision
-    axes[0, 1].plot(train_precisions, label='Train')
-    axes[0, 1].plot(val_precisions, label='Val')
+    # Plot 2: Precision
+    axes[0, 1].plot(epochs, train_precision, 'b-', label='Train Precision', linewidth=2)
+    axes[0, 1].plot(epochs, val_precision, 'r-', label='Val Precision', linewidth=2)
     axes[0, 1].set_xlabel('Epoch')
     axes[0, 1].set_ylabel('Precision')
-    axes[0, 1].set_title('Precision')
+    axes[0, 1].set_title('Frame-Level Precision')
     axes[0, 1].legend()
-    axes[0, 1].grid(True)
+    axes[0, 1].grid(True, alpha=0.3)
+    axes[0, 1].set_ylim([0, 1])
     
-    # Recall
-    axes[1, 0].plot(train_recalls, label='Train')
-    axes[1, 0].plot(val_recalls, label='Val')
+    # Plot 3: Recall
+    axes[1, 0].plot(epochs, train_recall, 'b-', label='Train Recall', linewidth=2)
+    axes[1, 0].plot(epochs, val_recall, 'r-', label='Val Recall', linewidth=2)
     axes[1, 0].set_xlabel('Epoch')
     axes[1, 0].set_ylabel('Recall')
-    axes[1, 0].set_title('Recall')
+    axes[1, 0].set_title('Frame-Level Recall')
     axes[1, 0].legend()
-    axes[1, 0].grid(True)
+    axes[1, 0].grid(True, alpha=0.3)
+    axes[1, 0].set_ylim([0, 1])
     
-    # F1
-    axes[1, 1].plot(train_f1s, label='Train')
-    axes[1, 1].plot(val_f1s, label='Val')
+    # Plot 4: F1 Score
+    axes[1, 1].plot(epochs, train_f1, 'b-', label='Train F1', linewidth=2)
+    axes[1, 1].plot(epochs, val_f1, 'r-', label='Val F1', linewidth=2)
     axes[1, 1].set_xlabel('Epoch')
     axes[1, 1].set_ylabel('F1 Score')
-    axes[1, 1].set_title('F1 Score')
+    axes[1, 1].set_title('Frame-Level F1 Score')
     axes[1, 1].legend()
-    axes[1, 1].grid(True)
+    axes[1, 1].grid(True, alpha=0.3)
+    axes[1, 1].set_ylim([0, 1])
     
     plt.tight_layout()
-    plt.savefig(save_path)
+    plt.savefig(save_path, dpi=150)
     plt.close()
 
 

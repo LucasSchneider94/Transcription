@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import os
 import pretty_midi
 import json
+from pathlib import Path
 
 from model import PianoTranscriptionModel, PianoTranscriptionModelLegacy
 from config import CONFIG, NUM_OUTPUTS, MIN_PITCH
@@ -286,6 +287,173 @@ def calculate_metrics(predictions, ground_truth, threshold=0.5):
         'recall': recall,
         'f1': f1
     }
+
+
+def inference_on_audio(model, audio_path, device, sr=16000, hop_length=512, threshold=0.5):
+    """
+    Run inference on an audio file with onset/offset/frame predictions.
+    
+    Args:
+        model: Trained PianoTranscriptionModel
+        audio_path: Path to audio file
+        device: torch device
+        sr: Sample rate
+        hop_length: Hop length for STFT
+        threshold: Threshold for binary predictions
+    
+    Returns:
+        Dictionary with 'onset', 'offset', 'frame' predictions and reconstructed MIDI
+    """
+    model.eval()
+    
+    # Load audio and compute spectrogram
+    y, _ = librosa.load(audio_path, sr=sr)
+    spec = librosa.stft(y, n_fft=2048, hop_length=hop_length)
+    spec_db = librosa.amplitude_to_db(np.abs(spec), ref=np.max)
+    
+    # Prepare input
+    spec_tensor = torch.FloatTensor(spec_db).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, freq, time)
+    
+    # Run inference
+    with torch.no_grad():
+        predictions = model(spec_tensor)
+    
+    # Apply sigmoid and threshold
+    onset_pred = torch.sigmoid(predictions['onset']).squeeze(0).cpu().numpy()  # (time, 88)
+    offset_pred = torch.sigmoid(predictions['offset']).squeeze(0).cpu().numpy()  # (time, 88)
+    frame_pred = torch.sigmoid(predictions['frame']).squeeze(0).cpu().numpy()  # (time, 88)
+    
+    onset_binary = (onset_pred > threshold).astype(np.uint8)
+    offset_binary = (offset_pred > threshold).astype(np.uint8)
+    frame_binary = (frame_pred > threshold).astype(np.uint8)
+    
+    # Reconstruct MIDI from onset/offset/frame predictions
+    midi_data = reconstruct_midi_from_predictions(
+        onset_binary, offset_binary, frame_binary,
+        fps=sr / hop_length
+    )
+    
+    return {
+        'onset': onset_pred,
+        'offset': offset_pred,
+        'frame': frame_pred,
+        'onset_binary': onset_binary,
+        'offset_binary': offset_binary,
+        'frame_binary': frame_binary,
+        'midi': midi_data
+    }
+
+
+def reconstruct_midi_from_predictions(onset, offset, frame, fps=100, min_duration=0.05):
+    """
+    Reconstruct MIDI from onset/offset/frame predictions.
+    
+    Args:
+        onset: Binary onset predictions (time, 88)
+        offset: Binary offset predictions (time, 88)
+        frame: Binary frame predictions (time, 88)
+        fps: Frames per second
+        min_duration: Minimum note duration in seconds
+    
+    Returns:
+        pretty_midi.PrettyMIDI object
+    """
+    pm = pretty_midi.PrettyMIDI()
+    piano = pretty_midi.Instrument(program=0)  # Acoustic Grand Piano
+    
+    min_frames = int(min_duration * fps)
+    
+    # Process each pitch
+    for pitch_idx in range(88):
+        pitch = pitch_idx + 21  # MIDI pitch (A0 = 21)
+        
+        # Find onsets for this pitch
+        onset_frames = np.where(onset[:, pitch_idx] == 1)[0]
+        
+        for onset_frame in onset_frames:
+            # Find the corresponding offset
+            # Look for offset after onset, or when frame becomes 0
+            offset_frame = None
+            
+            # First, check if there's an explicit offset detection
+            offset_candidates = np.where(offset[onset_frame:, pitch_idx] == 1)[0]
+            if len(offset_candidates) > 0:
+                offset_frame = onset_frame + offset_candidates[0]
+            
+            # Otherwise, use frame predictions to determine end
+            if offset_frame is None:
+                # Find where frame becomes 0 after onset
+                frame_end_candidates = np.where(frame[onset_frame:, pitch_idx] == 0)[0]
+                if len(frame_end_candidates) > 0:
+                    offset_frame = onset_frame + frame_end_candidates[0]
+                else:
+                    # Note extends to end of audio
+                    offset_frame = len(frame) - 1
+            
+            # Ensure minimum duration
+            if offset_frame - onset_frame < min_frames:
+                offset_frame = onset_frame + min_frames
+            
+            # Convert frames to time
+            start_time = onset_frame / fps
+            end_time = offset_frame / fps
+            
+            # Create MIDI note
+            note = pretty_midi.Note(
+                velocity=80,
+                pitch=pitch,
+                start=start_time,
+                end=end_time
+            )
+            piano.notes.append(note)
+    
+    pm.instruments.append(piano)
+    return pm
+
+
+def save_predictions_visualization(predictions, output_path, duration_seconds=10):
+    """
+    Visualize onset, offset, and frame predictions.
+    
+    Args:
+        predictions: Dictionary with prediction arrays
+        output_path: Path to save visualization
+        duration_seconds: Duration to visualize (from start)
+    """
+    import matplotlib.pyplot as plt
+    
+    onset = predictions['onset_binary']
+    offset = predictions['offset_binary']
+    frame = predictions['frame_binary']
+    
+    # Limit to specified duration
+    max_frames = min(onset.shape[0], int(duration_seconds * 100))  # Assuming 100 fps
+    onset = onset[:max_frames, :]
+    offset = offset[:max_frames, :]
+    frame = frame[:max_frames, :]
+    
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    
+    # Plot onset
+    axes[0].imshow(onset.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[0].set_ylabel('Piano Keys (88)')
+    axes[0].set_title('Onset Predictions')
+    
+    # Plot offset
+    axes[1].imshow(offset.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[1].set_ylabel('Piano Keys (88)')
+    axes[1].set_title('Offset Predictions')
+    
+    # Plot frame
+    axes[2].imshow(frame.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[2].set_ylabel('Piano Keys (88)')
+    axes[2].set_title('Frame Predictions (Active Notes)')
+    axes[2].set_xlabel('Time Frames')
+    
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    print(f"Visualization saved to {output_path}")
 
 
 def main():
