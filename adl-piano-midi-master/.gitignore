@@ -1,0 +1,9 @@
+*.pyc
+*.out
+*.zip
+*.midi
+*.wav
+*.mp3
+*.png
+midi/train
+midi/test

@@ -173,3 +173,15 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .DS_Store
+*.ipynb
+*.sf2
+*.wav
+*.mp3
+*.json
+*.csv
+*.pt
+*.mid
+*.midi
+*.npy
+*.npz
+*.png
