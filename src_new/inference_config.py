@@ -18,7 +18,7 @@ INFERENCE_CONFIG = {
     'end_time': 20.0,   # End time in seconds
     
     # Path to the trained model
-    'model_path': 'training_run_014/model.pth',
+    'model_path': 'training_run_018/model.pth',  # Updated to latest run
     
     # Output directory for results
     'output_dir': 'inference_results',

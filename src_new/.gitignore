@@ -88,3 +88,6 @@ htmlcov/
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# bs scripts
+schicker_timer.py

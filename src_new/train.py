@@ -1,6 +1,6 @@
 """
 Training script for piano transcription model.
-Refactored for clarity and maintainability.
+Supports onset + duration prediction with multiple modes (bins/log/linear).
 """
 
 import torch
@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from config import CONFIG, NUM_OUTPUTS
 from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly
-from dataset import PianoTranscriptionDataset
+from dataset import PianoTranscriptionDataset, duration_to_log_duration, log_duration_to_duration
 from utils import (
     get_next_run_folder,
     compute_metrics,
@@ -25,123 +25,90 @@ from utils import (
 )
 
 
-class TemporalConsistencyLoss(nn.Module):
+class OnsetDurationLoss(nn.Module):
     """
-    Enforces temporal consistency between onset, offset, and frame predictions.
-    
-    Penalizes:
-    1. Frames active before any onset occurs
-    2. Frames active after offset without new onset
-    3. Offsets occurring without active frames
+    Multi-task loss for onset, duration, and frame prediction.
+    Supports three duration modes:
+    - 'bins': Classification with cross-entropy loss
+    - 'log': Log-duration regression with MSE loss
+    - 'linear': Linear duration regression with MSE loss
     """
-    def __init__(self):
-        super(TemporalConsistencyLoss, self).__init__()
-    
-    def forward(self, onset_logits, offset_logits, frame_logits):
-        """
-        Args:
-            onset_logits: (batch, time, 88) - raw logits
-            offset_logits: (batch, time, 88) - raw logits
-            frame_logits: (batch, time, 88) - raw logits
-        
-        Returns:
-            consistency_loss: scalar tensor
-        """
-        # Apply sigmoid to get probabilities
-        onset_prob = torch.sigmoid(onset_logits)
-        offset_prob = torch.sigmoid(offset_logits)
-        frame_prob = torch.sigmoid(frame_logits)
-        
-        batch_size, time_steps, num_keys = onset_prob.shape
-        
-        # Compute cumulative onset probability (has there been an onset up to this point?)
-        # Use cummax to propagate onsets forward in time
-        cumulative_onset, _ = torch.cummax(onset_prob, dim=1)
-        
-        # Loss 1: Penalize frames active before first onset
-        # Frames should be 0 where cumulative_onset is low
-        frame_before_onset_loss = torch.mean(
-            frame_prob * (1 - cumulative_onset)
-        )
-        
-        # Loss 2: Penalize frames active after offset
-        # Create "note is finished" signal by accumulating offsets
-        cumulative_offset, _ = torch.cummax(offset_prob, dim=1)
-        # Note is finished if offset happened and no new onset occurred after
-        note_finished = cumulative_offset * (1 - onset_prob)
-        # Penalize frames that are active when note is finished
-        frame_after_offset_loss = torch.mean(
-            frame_prob * note_finished
-        )
-        
-        # Loss 3: Penalize offsets without active frames
-        # If offset is predicted, frames should be active (or have been recently)
-        offset_without_frame_loss = torch.mean(
-            offset_prob * (1 - frame_prob)
-        )
-        
-        # Combine losses
-        total_consistency_loss = (
-            frame_before_onset_loss + 
-            frame_after_offset_loss + 
-            offset_without_frame_loss
-        )
-        
-        return total_consistency_loss, {
-            'frame_before_onset': frame_before_onset_loss.item(),
-            'frame_after_offset': frame_after_offset_loss.item(),
-            'offset_without_frame': offset_without_frame_loss.item()
-        }
-
-
-class MultiTaskLoss(nn.Module):
-    """
-    Multi-task loss for onset, offset, and frame prediction.
-    Following "Onsets & Frames" approach with weighted BCE loss.
-    """
-    def __init__(self, onset_weight=4.0, offset_weight=1.0, frame_weight=1.0, 
-                 consistency_weight=0.5):
-        super(MultiTaskLoss, self).__init__()
+    def __init__(self, onset_weight=4.0, duration_weight=2.0, frame_weight=1.0, 
+                 duration_mode='log'):
+        super(OnsetDurationLoss, self).__init__()
         self.onset_weight = onset_weight
-        self.offset_weight = offset_weight
+        self.duration_weight = duration_weight
         self.frame_weight = frame_weight
-        self.consistency_weight = consistency_weight
+        self.duration_mode = duration_mode
+        
+        # Loss functions
         self.bce = nn.BCEWithLogitsLoss(reduction='mean')
-        self.consistency_loss = TemporalConsistencyLoss()
+        self.ce = nn.CrossEntropyLoss(reduction='none')  # Use 'none' for masking
+        self.mse = nn.MSELoss(reduction='none')  # Use 'none' for masking
     
     def forward(self, predictions, targets):
         """
         Args:
-            predictions: Dict with 'onset', 'offset', 'frame' logits
-            targets: Dict with 'onset', 'offset', 'frame' binary labels
+            predictions: Dict with 'onset', 'duration', 'frame' outputs
+                - onset: (batch, time, 88) - logits
+                - duration: (batch, time, 88, num_bins) for 'bins' mode
+                           or (batch, time, 88) for 'log'/'linear' modes - logits/values
+                - frame: (batch, time, 88) - logits
+            targets: Dict with 'onset', 'duration', 'frame' labels
+                - onset: (batch, time, 88) - binary
+                - duration: (batch, time, 88) - bin indices for 'bins' mode
+                           or log/linear duration values for 'log'/'linear' modes
+                - frame: (batch, time, 88) - binary
         
         Returns:
             Total weighted loss and individual losses
         """
+        # Onset loss (BCE)
         onset_loss = self.bce(predictions['onset'], targets['onset'])
-        offset_loss = self.bce(predictions['offset'], targets['offset'])
+        
+        # Duration loss (masked - only compute where onsets occur)
+        onset_mask = targets['onset'] > 0.5  # (batch, time, 88)
+        
+        if self.duration_mode == 'bins':
+            # Classification: cross-entropy loss
+            batch_size, time_steps, num_keys, num_bins = predictions['duration'].shape
+            
+            # Reshape for cross-entropy: (batch*time*keys, num_bins)
+            duration_pred_flat = predictions['duration'].reshape(-1, num_bins)
+            duration_target_flat = targets['duration'].reshape(-1).long()
+            onset_mask_flat = onset_mask.reshape(-1)
+            
+            # Compute CE loss for all positions
+            ce_loss = self.ce(duration_pred_flat, duration_target_flat)
+            
+            # Apply mask and take mean over onset positions only
+            if onset_mask_flat.sum() > 0:
+                duration_loss = ce_loss[onset_mask_flat].mean()
+            else:
+                duration_loss = torch.tensor(0.0, device=predictions['onset'].device)
+        
+        else:
+            # Regression: MSE loss (log or linear)
+            mse_loss = self.mse(predictions['duration'], targets['duration'])
+            
+            # Apply mask and take mean over onset positions only
+            if onset_mask.sum() > 0:
+                duration_loss = mse_loss[onset_mask].mean()
+            else:
+                duration_loss = torch.tensor(0.0, device=predictions['onset'].device)
+        
+        # Frame loss (BCE) - for consistency/auxiliary task
         frame_loss = self.bce(predictions['frame'], targets['frame'])
         
-        # Compute temporal consistency loss
-        consistency_loss, consistency_dict = self.consistency_loss(
-            predictions['onset'],
-            predictions['offset'],
-            predictions['frame']
-        )
-        
+        # Total loss
         total_loss = (self.onset_weight * onset_loss + 
-                     self.offset_weight * offset_loss + 
-                     self.frame_weight * frame_loss +
-                     self.consistency_weight * consistency_loss)
+                     self.duration_weight * duration_loss + 
+                     self.frame_weight * frame_loss)
         
         return total_loss, {
             'onset_loss': onset_loss.item(),
-            'offset_loss': offset_loss.item(),
+            'duration_loss': duration_loss.item(),
             'frame_loss': frame_loss.item(),
-            'consistency_loss': consistency_loss.item(),
-            'frame_before_onset': consistency_dict['frame_before_onset'],
-            'frame_after_offset': consistency_dict['frame_after_offset'],
-            'offset_without_frame': consistency_dict['offset_without_frame'],
             'total_loss': total_loss.item()
         }
 
@@ -199,7 +166,7 @@ def create_datasets_and_loaders(data_dir, config):
     print(f"  Train: {train_count} files ({train_count/num_files*100:.1f}%)")
     print(f"  Val:   {val_count} files ({val_count/num_files*100:.1f}%)")
     
-    # Create datasets with RAM preloading option
+    # Create datasets with duration_mode from config
     train_dataset = PianoTranscriptionDataset(
         data_dir,
         config['snippet_frames'],
@@ -208,7 +175,8 @@ def create_datasets_and_loaders(data_dir, config):
         file_list=all_files,
         seed=42,
         fixed_snippets=config.get('fixed_snippets', False),
-        preload_into_ram=config.get('preload_into_ram', True)  # NEW: RAM preloading
+        preload_into_ram=config.get('preload_into_ram', True),
+        duration_mode=config.get('duration_mode', 'log')  # NEW: pass duration mode
     )
     
     val_dataset = PianoTranscriptionDataset(
@@ -219,10 +187,12 @@ def create_datasets_and_loaders(data_dir, config):
         file_list=all_files,
         seed=42,
         fixed_snippets=config.get('fixed_snippets', False),
-        preload_into_ram=config.get('preload_into_ram', True)  # NEW: RAM preloading
+        preload_into_ram=config.get('preload_into_ram', True),
+        duration_mode=config.get('duration_mode', 'log')  # NEW: pass duration mode
     )
     
     print(f"\nDataset summary:")
+    print(f"  Duration mode: {config.get('duration_mode', 'log')}")
     print(f"  Train snippets: {len(train_dataset)}")
     print(f"  Val snippets:   {len(val_dataset)}")
     
@@ -342,7 +312,7 @@ def compute_frame_metrics(predictions, targets, threshold=0.5):
 def train_epoch(model, dataloader, criterion, optimizer, device):
     """Train for one epoch."""
     model.train()
-    total_losses = {'onset_loss': 0, 'offset_loss': 0, 'frame_loss': 0, 'consistency_loss': 0, 'total_loss': 0}
+    total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
     total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
     
     pbar = tqdm(dataloader, desc="Training")
@@ -350,7 +320,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         # Move data to device
         spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
         onset = batch['onset'].to(device)
-        offset = batch['offset'].to(device)
+        duration = batch['duration'].to(device)
         frame = batch['frame'].to(device)
         
         # Forward pass
@@ -358,7 +328,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         predictions = model(spectrogram)
         
         # Compute loss
-        targets = {'onset': onset, 'offset': offset, 'frame': frame}
+        targets = {'onset': onset, 'duration': duration, 'frame': frame}
         loss, loss_dict = criterion(predictions, targets)
         
         # Backward pass
@@ -394,7 +364,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
 def validate(model, dataloader, criterion, device):
     """Validate the model."""
     model.eval()
-    total_losses = {'onset_loss': 0, 'offset_loss': 0, 'frame_loss': 0, 'consistency_loss': 0, 'total_loss': 0}
+    total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
     total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
     
     with torch.no_grad():
@@ -402,14 +372,14 @@ def validate(model, dataloader, criterion, device):
             # Move data to device
             spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
             onset = batch['onset'].to(device)
-            offset = batch['offset'].to(device)
+            duration = batch['duration'].to(device)
             frame = batch['frame'].to(device)
             
             # Forward pass
             predictions = model(spectrogram)
             
             # Compute loss
-            targets = {'onset': onset, 'offset': offset, 'frame': frame}
+            targets = {'onset': onset, 'duration': duration, 'frame': frame}
             loss, loss_dict = criterion(predictions, targets)
             
             # Compute frame metrics
@@ -460,24 +430,26 @@ def train(data_dir, run_folder, config):
             transformer_dim=config['hidden_size'],
             num_heads=config['num_heads'],
             num_layers=config['num_layers'],
-            dropout=config['dropout']
+            dropout=config['dropout'],
+            duration_mode=config.get('duration_mode', 'log'),  # ADD: pass duration_mode
+            num_duration_bins=config.get('num_duration_bins', 8)  # ADD: pass num_duration_bins
         ).to(device)
     
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Loss and optimizer - use config weights
-    criterion = MultiTaskLoss(
+    criterion = OnsetDurationLoss(
         onset_weight=config.get('onset_weight', 4.0),
-        offset_weight=config.get('offset_weight', 1.0),
+        duration_weight=config.get('duration_weight', 2.0),
         frame_weight=config.get('frame_weight', 1.0),
-        consistency_weight=config.get('consistency_weight', 0.5)
+        duration_mode=config.get('duration_mode', 'log')
     )
     
     print(f"\nLoss weights:")
     print(f"  Onset: {config.get('onset_weight', 4.0)}")
-    print(f"  Offset: {config.get('offset_weight', 1.0)}")
+    print(f"  Duration: {config.get('duration_weight', 2.0)}")
     print(f"  Frame: {config.get('frame_weight', 1.0)}")
-    print(f"  Consistency: {config.get('consistency_weight', 0.5)}")
+    print(f"  Duration mode: {config.get('duration_mode', 'log')}")
     
     optimizer = optim.Adam(
         model.parameters(),
@@ -532,9 +504,9 @@ def train(data_dir, run_folder, config):
         # Print stats
         print(f"Loss - Train: {train_loss['total_loss']:.4f}, Val: {val_loss['total_loss']:.4f}")
         print(f"Train - Onset: {train_loss['onset_loss']:.4f}, "
-              f"Offset: {train_loss['offset_loss']:.4f}, Frame: {train_loss['frame_loss']:.4f}, Consistency: {train_loss['consistency_loss']:.4f}")
+              f"Duration: {train_loss['duration_loss']:.4f}, Frame: {train_loss['frame_loss']:.4f}")
         print(f"Val   - Onset: {val_loss['onset_loss']:.4f}, "
-              f"Offset: {val_loss['offset_loss']:.4f}, Frame: {val_loss['frame_loss']:.4f}, Consistency: {val_loss['consistency_loss']:.4f}")
+              f"Duration: {val_loss['duration_loss']:.4f}, Frame: {val_loss['frame_loss']:.4f}")
         print(f"Train - Precision: {train_metric['precision']:.4f}, Recall: {train_metric['recall']:.4f}, F1: {train_metric['f1']:.4f}")
         print(f"Val   - Precision: {val_metric['precision']:.4f}, Recall: {val_metric['recall']:.4f}, F1: {val_metric['f1']:.4f}")
         

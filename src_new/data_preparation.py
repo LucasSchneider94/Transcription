@@ -22,6 +22,119 @@ PLOT_PNGS = CONFIG['plot_pngs']
 SPLIT_YEAR = CONFIG['split_year_folder']
 DATA_DIR = CONFIG['data_dir']
 
+# Duration bin edges (in seconds) - logarithmic scale
+# Bins: 0-0.05, 0.05-0.1, 0.1-0.2, 0.2-0.4, 0.4-0.8, 0.8-1.6, 1.6-3.2, 3.2+
+DURATION_BINS = np.array([0.0, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, np.inf])
+NUM_DURATION_BINS = len(DURATION_BINS) - 1  # 8 bins
+
+def get_duration_bin(duration_seconds):
+    """
+    Convert duration in seconds to bin index.
+    
+    Args:
+        duration_seconds: Duration in seconds
+        
+    Returns:
+        Bin index (0 to NUM_DURATION_BINS-1)
+    """
+    for i in range(len(DURATION_BINS) - 1):
+        if DURATION_BINS[i] <= duration_seconds < DURATION_BINS[i + 1]:
+            return i
+    return NUM_DURATION_BINS - 1  # Last bin for very long notes
+
+def get_duration_bin_label(bin_idx):
+    """Get human-readable label for duration bin."""
+    if bin_idx >= NUM_DURATION_BINS:
+        return "Invalid"
+    if bin_idx == NUM_DURATION_BINS - 1:
+        return f"{DURATION_BINS[bin_idx]:.2f}s+"
+    return f"{DURATION_BINS[bin_idx]:.2f}-{DURATION_BINS[bin_idx+1]:.2f}s"
+
+def visualize_onset_duration_labels(onset, duration, frame, pedal, save_path, max_seconds=5, fps=100):
+    """
+    Visualize onset, duration, frame, and pedal data as separate subplots.
+    
+    Args:
+        onset (np.ndarray): Onset roll (time, 88) - binary
+        duration (np.ndarray): Duration roll (time, 88) - exact duration in seconds at onset frames, 0 elsewhere
+        frame (np.ndarray): Frame roll (time, 88) - binary active notes
+        pedal (np.ndarray): Pedal roll (time, 1) - binary
+        save_path (str): Path to save the PNG image
+        max_seconds (int): Maximum seconds to visualize
+        fps (int): Frames per second
+    """
+    if not PLOT_PNGS:
+        return
+    
+    # Limit to first N seconds
+    max_frames = int(fps * max_seconds)
+    onset = onset[:max_frames, :]
+    duration = duration[:max_frames, :]
+    frame = frame[:max_frames, :]
+    pedal = pedal[:max_frames, :]
+    
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    
+    # Panel 1: Combined onset + duration heatmap
+    # Convert exact durations to bins for visualization
+    duration_binned = np.zeros_like(duration)
+    for i in range(NUM_DURATION_BINS):
+        mask = (duration >= DURATION_BINS[i]) & (duration < DURATION_BINS[i+1])
+        duration_binned[mask] = i
+    
+    # 0 = silence/no onset, 1-8 = duration bins (mapped to warm colors)
+    onset_duration_combined = duration_binned.astype(float).copy()
+    # Where there's no onset, set to 0 (will appear as dark/cold color)
+    onset_duration_combined[onset == 0] = 0
+    # Add 1 to duration bins so they map to 1-8 instead of 0-7 (for better color separation from silence)
+    onset_duration_combined[onset == 1] = duration_binned[onset == 1] + 1
+    
+    im1 = axes[0].imshow(onset_duration_combined.T, aspect='auto', origin='lower', 
+                         cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
+    axes[0].set_title(f'Onsets with Duration (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
+    axes[0].set_ylabel('Piano Keys (88)', fontsize=10)
+    
+    # Add colorbar with bin labels
+    cbar1 = plt.colorbar(im1, ax=axes[0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
+    cbar1.set_label('Duration', fontsize=10)
+    tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
+    cbar1.ax.set_yticklabels(tick_labels, fontsize=8)
+    
+    # Panel 2: Frame (active notes)
+    axes[1].imshow(frame.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[1].set_title(f'Frame (Active Notes) (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
+    axes[1].set_ylabel('Piano Keys (88)', fontsize=10)
+    
+    # Panel 3: Pedal
+    axes[2].imshow(pedal.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[2].set_title(f'Sustain Pedal (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
+    axes[2].set_ylabel('Pedal', fontsize=10)
+    axes[2].set_xlabel('Time Frames', fontsize=10)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+    
+    # Print statistics
+    num_onsets = np.sum(onset)
+    if num_onsets > 0:
+        print(f"  Visualization stats:")
+        print(f"    Total onsets: {int(num_onsets)}")
+        
+        # Get exact durations at onset frames
+        exact_durations = duration[onset == 1]
+        print(f"    Duration range: {exact_durations.min():.3f}s - {exact_durations.max():.3f}s")
+        print(f"    Mean duration: {exact_durations.mean():.3f}s")
+        print(f"    Median duration: {np.median(exact_durations):.3f}s")
+        
+        # Show distribution across bins
+        duration_bins_count = [np.sum((exact_durations >= DURATION_BINS[i]) & 
+                                      (exact_durations < DURATION_BINS[i+1])) 
+                              for i in range(NUM_DURATION_BINS)]
+        for i, count in enumerate(duration_bins_count):
+            if count > 0:
+                print(f"    {get_duration_bin_label(i)}: {int(count)} notes ({count/num_onsets*100:.1f}%)")
+
 def process_maestro_split(maestro_dir, output_dir, split_year="2017"):
     """
     Process the MAESTRO dataset for a specific split year.
@@ -50,127 +163,6 @@ def process_maestro_split(maestro_dir, output_dir, split_year="2017"):
                 # Process MIDI and audio together
                 process_midi(midi_path, output_dir)
 
-def build_binary_piano_roll_with_pedals(midi_data, roll_fps=ROLL_FPS):
-    """
-    Build a binary piano roll with additional channels for pedal activations.
-
-    Args:
-        midi_data (pretty_midi.PrettyMIDI): MIDI data object.
-        roll_fps (float): Frames per second for the piano roll.
-
-    Returns:
-        np.ndarray: Piano roll with 91 channels (88 keys + 3 pedals).
-    """
-    end_time = midi_data.get_end_time()
-    n_frames = int(end_time * roll_fps) + 1
-
-    # Initialize piano roll with 91 channels (88 keys + 3 pedals)
-    piano_roll = np.zeros((n_frames, NUM_KEYS + NUM_PEDALS), dtype=np.uint8)
-
-    # Process notes - filter and map to the range of 88 keys (MIDI pitches 21 to 108)
-    for instrument in midi_data.instruments:
-        if instrument.is_drum:
-            continue
-        for note in instrument.notes:
-            if MIN_PITCH <= note.pitch <= MAX_PITCH:
-                start_frame = int(note.start * roll_fps)
-                end_frame = int(note.end * roll_fps)
-                piano_roll[start_frame:end_frame, note.pitch - MIN_PITCH] = 1
-
-    # Process pedals (control changes)
-    pedal_controls = {
-        64: NUM_KEYS,      # Sustain pedal
-        67: NUM_KEYS + 1,  # Soft pedal
-        66: NUM_KEYS + 2   # Sostenuto pedal
-    }
-
-    for instrument in midi_data.instruments:
-        for cc in instrument.control_changes:
-            if cc.number in pedal_controls:
-                pedal_channel = pedal_controls[cc.number]
-                frame = int(cc.time * roll_fps)
-                piano_roll[frame:, pedal_channel] = 1 if cc.value >= 64 else 0
-
-    return piano_roll
-
-def visualize_piano_roll_with_onsets_offsets(onset, offset, frame, pedal, save_path, max_seconds=5, fps=100):
-    """
-    Visualize onset, offset, frame, and pedal data as separate subplots.
-    
-    Args:
-        onset (np.ndarray): Onset roll (time, 88)
-        offset (np.ndarray): Offset roll (time, 88)
-        frame (np.ndarray): Frame roll (time, 88)
-        pedal (np.ndarray): Pedal roll (time, 1)
-        save_path (str): Path to save the PNG image
-        max_seconds (int): Maximum seconds to visualize
-        fps (int): Frames per second
-    """
-    if not PLOT_PNGS:
-        return
-    
-    # Limit to first N seconds
-    max_frames = int(fps * max_seconds)
-    onset = onset[:max_frames, :]
-    offset = offset[:max_frames, :]
-    frame = frame[:max_frames, :]
-    pedal = pedal[:max_frames, :]
-    
-    fig, axes = plt.subplots(4, 1, figsize=(15, 12), sharex=True)
-    
-    # Plot onset
-    axes[0].imshow(onset.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[0].set_title(f'Onset Predictions (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
-    axes[0].set_ylabel('Piano Keys (88)', fontsize=10)
-    
-    # Plot offset
-    axes[1].imshow(offset.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[1].set_title(f'Offset Predictions (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
-    axes[1].set_ylabel('Piano Keys (88)', fontsize=10)
-    
-    # Plot frame (active notes)
-    axes[2].imshow(frame.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[2].set_title(f'Frame (Active Notes) (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
-    axes[2].set_ylabel('Piano Keys (88)', fontsize=10)
-    
-    # Plot pedal
-    axes[3].imshow(pedal.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[3].set_title(f'Sustain Pedal (First {max_seconds} Seconds)', fontsize=12, fontweight='bold')
-    axes[3].set_ylabel('Pedal', fontsize=10)
-    axes[3].set_xlabel('Time Frames', fontsize=10)
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    #print(f"  Saved visualization: {save_path}")
-
-
-def visualize_piano_roll(piano_roll, save_path):
-    """
-    Visualize and save the piano roll as a PNG image (first 5 seconds only).
-    LEGACY: For old-style piano rolls with pedals.
-
-    Args:
-        piano_roll (np.ndarray): The piano roll to visualize.
-        save_path (str): Path to save the PNG image.
-    """
-    if not PLOT_PNGS:
-        return
-
-    # Limit the piano roll to the first 5 seconds
-    max_frames = int(ROLL_FPS * 5)
-    piano_roll = piano_roll[:max_frames, :]
-
-    plt.figure(figsize=(12, 6))
-    plt.imshow(piano_roll.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    plt.colorbar(label='Intensity')
-    plt.title('Piano Roll Visualization (First 5 Seconds)')
-    plt.xlabel('Time Frames')
-    plt.ylabel('MIDI Note Number')
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-
 def process_midi(mid_path, output_dir):
     """
     Process a single MIDI file: create piano roll and spectrogram.
@@ -182,12 +174,11 @@ def process_midi(mid_path, output_dir):
     midi_data = pretty_midi.PrettyMIDI(mid_path)
     file_name = os.path.splitext(os.path.basename(mid_path))[0]
 
-    # Build onset/offset/frame labels instead of old piano roll
-    labels = create_piano_roll_with_onsets_offsets(
+    # Build onset/duration/frame labels
+    labels = create_piano_roll_with_onsets_durations(
         mid_path,
         fps=ROLL_FPS,
-        onset_frames=CONFIG.get('onset_frames', 2),
-        offset_frames=CONFIG.get('offset_frames', 1)
+        onset_frames=CONFIG.get('onset_frames', 2)
     )
 
     # Process audio to spectrogram
@@ -207,23 +198,23 @@ def process_midi(mid_path, output_dir):
     for key in labels:
         labels[key] = labels[key][:min_frames]
 
-    # Save as .npz with onset/offset/frame (compatible format, can be loaded by old code too)
+    # Save as .npz with onset/duration/frame
     output_filename = os.path.join(output_dir, f"{file_name}_piano_roll_with_pedals.npz")
     np.savez_compressed(
         output_filename,
         onset=labels['onset'],
-        offset=labels['offset'],
+        duration=labels['duration'],
         frame=labels['frame'],
         pedal=labels['pedal'],
         spectrogram=spectrogram
     )
 
-    # Visualize onset/offset/frame labels if enabled
+    # Visualize onset/duration/frame labels if enabled
     if PLOT_PNGS:
         labels_plot_path = os.path.join(output_dir, f"{file_name}_labels.png")
-        visualize_piano_roll_with_onsets_offsets(
+        visualize_onset_duration_labels(
             labels['onset'],
-            labels['offset'],
+            labels['duration'],
             labels['frame'],
             labels['pedal'],
             labels_plot_path,
@@ -262,7 +253,7 @@ def preprocess_audio_to_spectrogram(audio_path, plot_path=None, save_path=None):
         max_time_frames = int(5 * SAMPLE_RATE / HOP_LENGTH)
         librosa.display.specshow(
             log_mel_spectrogram[:, :max_time_frames],
-            sr=SAMPLE_RATE, hop_length=HOP_LENGTH, x_axis='time', y_axis='mel', cmap='viridis'
+            sr=SAMPLE_RATE, hop_length=HOP_LENGTH, x_axis='time', y_axis='mel', cmap='hot'
         )
         plt.colorbar(format='%+2.0f dB')
         plt.title('Mel-Spectrogram (First 5 Seconds)')
@@ -276,28 +267,32 @@ def preprocess_audio_to_spectrogram(audio_path, plot_path=None, save_path=None):
 
     return log_mel_spectrogram
 
-def create_piano_roll_with_onsets_offsets(midi_path: str, 
-                                          fps: int = 100,
-                                          pitches: int = 88,
-                                          onset_frames: int = 2,
-                                          offset_frames: int = 1) -> Dict[str, np.ndarray]:
+def create_piano_roll_with_onsets_durations(midi_path: str, 
+                                            fps: int = 100,
+                                            pitches: int = 88,
+                                            onset_frames: int = 2) -> Dict[str, np.ndarray]:
     """
-    Create piano roll with onset, offset, and frame labels.
+    Create piano roll with onset, duration, and frame labels.
     
-    Following the "Onsets & Frames" approach:
+    New approach:
     - Onset: binary, marks note start (in N consecutive frames for alignment)
-    - Offset: binary, marks note end (respecting sustain pedal)
-    - Frame: binary, marks active notes
+    - Duration: bin index (0 to NUM_DURATION_BINS-1) at ALL onset frames
+    - Frame: binary, marks active notes with pedal extension (acoustic duration)
+    
+    IMPORTANT: Duration represents KEY PRESS TIME (note.end - note.start), NOT acoustic duration.
+    This ensures:
+    1. No conflict between duration and pedal (staccato with pedal down is valid)
+    2. Sheet music can be reconstructed (durations match written notation)
+    3. Acoustic rendering: predicted_duration + pedal_state = acoustic_duration
     
     Args:
         midi_path: Path to MIDI file
         fps: Frames per second (temporal resolution)
         pitches: Number of piano keys (88)
         onset_frames: Number of consecutive frames to mark for onsets
-        offset_frames: Number of consecutive frames to mark for offsets
     
     Returns:
-        Dictionary with keys 'onset', 'offset', 'frame', 'pedal'
+        Dictionary with keys 'onset', 'duration', 'frame', 'pedal'
     """
     pm = pretty_midi.PrettyMIDI(midi_path)
     
@@ -307,7 +302,7 @@ def create_piano_roll_with_onsets_offsets(midi_path: str,
     
     # Initialize arrays
     onset_roll = np.zeros((num_frames, pitches), dtype=np.float32)
-    offset_roll = np.zeros((num_frames, pitches), dtype=np.float32)
+    duration_roll = np.zeros((num_frames, pitches), dtype=np.float32)  # Exact durations in seconds
     frame_roll = np.zeros((num_frames, pitches), dtype=np.float32)
     pedal_roll = np.zeros((num_frames, 1), dtype=np.float32)
     
@@ -367,17 +362,12 @@ def create_piano_roll_with_onsets_offsets(midi_path: str,
                 start_frame = int(note.start * fps)
                 end_frame = int(note.end * fps)
                 
-                # Mark onset in N consecutive frames for better alignment
-                onset_end = min(start_frame + onset_frames, num_frames)
-                if start_frame < num_frames:
-                    onset_roll[start_frame:onset_end, pitch_idx] = 1.0
+                # KEY CHANGE: Use note duration (key press time) ONLY
+                # This is the duration we want the model to learn
+                note_duration = note.end - note.start
                 
-                # Mark frames (active notes)
-                frame_end = min(end_frame, num_frames)
-                frame_roll[start_frame:frame_end, pitch_idx] = 1.0
-                
-                # Determine offset frame (with sustain pedal handling)
-                offset_frame = end_frame
+                # Calculate acoustic duration (with pedal consideration) for frame roll
+                acoustic_end_time = note.end
                 
                 # If sustain pedal is active at note end, extend until:
                 # 1) Pedal is released, OR
@@ -397,88 +387,42 @@ def create_piano_roll_with_onsets_offsets(midi_path: str,
                         if next_note.start < pedal_release_time:
                             next_onset_time = next_note.start
                     
-                    # Extend frame until re-strike or pedal release
-                    extended_end_frame = int(min(next_onset_time, pedal_release_time) * fps)
-                    frame_roll[end_frame:min(extended_end_frame, num_frames), pitch_idx] = 1.0
-                    offset_frame = extended_end_frame
+                    # Acoustic duration extends to re-strike or pedal release
+                    acoustic_end_time = min(next_onset_time, pedal_release_time)
                 
-                # Mark offset in N consecutive frames
-                offset_end = min(offset_frame + offset_frames, num_frames)
-                if offset_frame < num_frames:
-                    offset_roll[offset_frame:offset_end, pitch_idx] = 1.0
+                acoustic_end_frame = int(acoustic_end_time * fps)
+                
+                # Mark onset in N consecutive frames for better alignment
+                onset_end = min(start_frame + onset_frames, num_frames)
+                if start_frame < num_frames:
+                    onset_roll[start_frame:onset_end, pitch_idx] = 1.0
+                    
+                    # FIX: Store exact duration in seconds at ALL onset frames
+                    duration_roll[start_frame:onset_end, pitch_idx] = note_duration
+                
+                # Mark frames (active notes) - acoustic duration (what you hear)
+                frame_end = min(acoustic_end_frame, num_frames)
+                frame_roll[start_frame:frame_end, pitch_idx] = 1.0
     
     return {
         'onset': onset_roll,
-        'offset': offset_roll,
+        'duration': duration_roll,
         'frame': frame_roll,
         'pedal': pedal_roll
     }
 
-def prepare_dataset(audio_dir: str, 
-                   midi_dir: str, 
-                   output_dir: str,
-                   sr: int = 16000,
-                   n_fft: int = 2048,
-                   hop_length: int = 512,
-                   fps: int = 100):
-    """
-    Prepare dataset with spectrograms and onset/offset/frame labels.
-    """
-    os.makedirs(output_dir, exist_ok=True)
-    
-    audio_files = sorted(Path(audio_dir).glob('*.wav'))
-    midi_files = sorted(Path(midi_dir).glob('*.mid'))
-    
-    for audio_file, midi_file in zip(audio_files, midi_files):
-        print(f"Processing {audio_file.stem}...")
-        
-        # Load audio and compute spectrogram
-        y, _ = librosa.load(str(audio_file), sr=sr)
-        spec = librosa.stft(y, n_fft=n_fft, hop_length=hop_length)
-        spec_db = librosa.amplitude_to_db(np.abs(spec), ref=np.max)
-        
-        # Create piano roll with onsets and offsets
-        labels = create_piano_roll_with_onsets_offsets(
-            str(midi_file), 
-            fps=fps,
-            onset_frames=CONFIG.get('onset_frames', 2),
-            offset_frames=CONFIG.get('offset_frames', 1)
-        )
-        
-        # Ensure temporal alignment
-        min_frames = min(spec_db.shape[1], labels['frame'].shape[0])
-        spec_db = spec_db[:, :min_frames]
-        
-        for key in labels:
-            labels[key] = labels[key][:min_frames]
-        
-        # Visualize onset/offset/frame labels
-        if PLOT_PNGS:
-            viz_path = Path(output_dir) / f"{audio_file.stem}_labels.png"
-            visualize_piano_roll_with_onsets_offsets(
-                labels['onset'],
-                labels['offset'],
-                labels['frame'],
-                labels['pedal'],
-                str(viz_path),
-                max_seconds=5,
-                fps=fps
-            )
-        
-        # Save
-        output_path = Path(output_dir) / f"{audio_file.stem}.pkl"
-        with open(output_path, 'wb') as f:
-            pickle.dump({
-                'spectrogram': spec_db,
-                'onset': labels['onset'],
-                'offset': labels['offset'],
-                'frame': labels['frame'],
-                'pedal': labels['pedal']
-            }, f)
-        
-        print(f"  Saved: {output_path}")
-
 if __name__ == "__main__":
+    print("="*80)
+    print("Piano Transcription Data Preparation - Onset + Duration Approach")
+    print("="*80)
+    print(f"\nDuration bins (logarithmic scale):")
+    for i in range(NUM_DURATION_BINS):
+        print(f"  Bin {i}: {get_duration_bin_label(i)}")
+    print(f"\nTotal bins: {NUM_DURATION_BINS}")
+    print(f"FPS: {ROLL_FPS}")
+    print(f"Onset frames: {CONFIG.get('onset_frames', 2)}")
+    print("="*80)
+    
     maestro_dir = "../maestro-v3.0.0"
     output_dir = DATA_DIR
     process_maestro_split(maestro_dir, output_dir, split_year=SPLIT_YEAR)

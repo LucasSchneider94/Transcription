@@ -166,7 +166,8 @@ class PianoTranscriptionModelLegacy(nn.Module):
 class PianoTranscriptionModel(nn.Module):
     """
     Piano transcription model with CNN-Transformer architecture.
-    Outputs three heads: onset, offset, and frame predictions.
+    Outputs two heads: onset and duration predictions.
+    Duration can be either classification (bins) or regression (log/linear).
     """
     def __init__(self, 
                  input_features=CONFIG['n_mels'],
@@ -175,8 +176,13 @@ class PianoTranscriptionModel(nn.Module):
                  transformer_dim=256,
                  num_heads=8,
                  num_layers=6,
-                 dropout=0.1):
+                 dropout=0.1,
+                 duration_mode='bins',
+                 num_duration_bins=8):
         super(PianoTranscriptionModel, self).__init__()
+        
+        self.duration_mode = duration_mode
+        self.num_duration_bins = num_duration_bins
         
         # Convolutional feature extractor
         self.feature_extractor = ConvolutionalFeatureExtractor(input_features, transformer_dim)
@@ -194,19 +200,30 @@ class PianoTranscriptionModel(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         
-        # Three output heads following "Onsets & Frames" approach
+        # Two output heads: onset and duration
         self.onset_head = nn.Linear(transformer_dim, num_keys)
-        self.offset_head = nn.Linear(transformer_dim, num_keys)
+        
+        if duration_mode == 'bins':
+            # Classification: predict duration bin for each key
+            self.duration_head = nn.Linear(transformer_dim, num_keys * num_duration_bins)
+        else:
+            # Regression: predict continuous duration (log or linear)
+            self.duration_head = nn.Linear(transformer_dim, num_keys)
+        
+        # Optional: frame head for consistency loss (predicting active notes)
         self.frame_head = nn.Linear(transformer_dim, num_keys)
         
     def forward(self, x):
         """
         Args:
-            x: Input spectrogram (batch, freq, time)
+            x: Input spectrogram (batch, 1, freq, time)
             
         Returns:
-            Dictionary with 'onset', 'offset', 'frame' predictions
-            Each shape: (batch, time, num_keys)
+            Dictionary with 'onset', 'duration', 'frame' predictions
+            - onset: (batch, time, num_keys) - logits
+            - duration: (batch, time, num_keys, num_bins) for classification 
+                       or (batch, time, num_keys) for regression - logits/values
+            - frame: (batch, time, num_keys) - logits
         """
         # Extract features with CNN
         x = self.feature_extractor(x)  # (batch_size, time_frames, transformer_dim)
@@ -217,14 +234,25 @@ class PianoTranscriptionModel(nn.Module):
         # Transformer encoding
         x = self.transformer(x)  # (batch_size, time_frames, transformer_dim)
         
-        # Apply three output heads
+        # Apply onset head
         onset_logits = self.onset_head(x)  # (batch, time, num_keys)
-        offset_logits = self.offset_head(x)  # (batch, time, num_keys)
+        
+        # Apply duration head
+        duration_output = self.duration_head(x)
+        if self.duration_mode == 'bins':
+            # Reshape to (batch, time, num_keys, num_bins) for classification
+            batch_size, time_frames, _ = x.shape
+            duration_logits = duration_output.view(batch_size, time_frames, -1, self.num_duration_bins)
+        else:
+            # (batch, time, num_keys) for regression
+            duration_logits = duration_output
+        
+        # Apply frame head for consistency
         frame_logits = self.frame_head(x)  # (batch, time, num_keys)
         
         return {
             'onset': onset_logits,
-            'offset': offset_logits,
+            'duration': duration_logits,
             'frame': frame_logits
         }
 
@@ -274,10 +302,12 @@ class PianoTranscriptionModelCNNOnly(nn.Module):
 if __name__ == "__main__":
     from config import CONFIG, NUM_OUTPUTS
     
-    # Test both models
+    # Test onset + duration model
     print("="*80)
-    print("FULL MODEL (CNN + Transformer)")
+    print("ONSET + DURATION MODEL (CNN + Transformer)")
     print("="*80)
+    print(f"Duration mode: {CONFIG['duration_mode']}")
+    
     model = PianoTranscriptionModel(
         input_features=CONFIG['n_mels'],
         num_keys=CONFIG['num_keys'],
@@ -285,7 +315,9 @@ if __name__ == "__main__":
         transformer_dim=CONFIG['hidden_size'],
         num_heads=CONFIG['num_heads'],
         num_layers=CONFIG['num_layers'],
-        dropout=CONFIG['dropout']
+        dropout=CONFIG['dropout'],
+        duration_mode=CONFIG['duration_mode'],
+        num_duration_bins=CONFIG['num_duration_bins']
     )
     
     # Create dummy input
@@ -296,8 +328,30 @@ if __name__ == "__main__":
     # Forward pass
     output = model(dummy_input)
     print(f"Input shape: {dummy_input.shape}")
-    print(f"Output shapes: onset={output['onset'].shape}, offset={output['offset'].shape}, frame={output['frame'].shape}")
+    print(f"Output shapes:")
+    print(f"  - onset: {output['onset'].shape}")
+    print(f"  - duration: {output['duration'].shape}")
+    print(f"  - frame: {output['frame'].shape}")
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    
+    # Test with different duration modes
+    print("\n" + "="*80)
+    print("TESTING DIFFERENT DURATION MODES")
+    print("="*80)
+    
+    for mode in ['bins', 'log', 'linear']:
+        model_test = PianoTranscriptionModel(
+            input_features=CONFIG['n_mels'],
+            num_keys=CONFIG['num_keys'],
+            transformer_dim=CONFIG['hidden_size'],
+            num_heads=CONFIG['num_heads'],
+            num_layers=CONFIG['num_layers'],
+            dropout=CONFIG['dropout'],
+            duration_mode=mode,
+            num_duration_bins=CONFIG['num_duration_bins']
+        )
+        out = model_test(dummy_input)
+        print(f"{mode:10s} mode - duration shape: {out['duration'].shape}")
     
     print("\n" + "="*80)
     print("CNN-ONLY MODEL (Ablation Study)")
@@ -319,7 +373,7 @@ if __name__ == "__main__":
     print("="*80)
     full_params = sum(p.numel() for p in model.parameters())
     cnn_params = sum(p.numel() for p in model_cnn.parameters())
-    print(f"Full model: {full_params:,} parameters")
+    print(f"Onset+Duration model: {full_params:,} parameters")
     print(f"CNN-only: {cnn_params:,} parameters")
     print(f"Transformer overhead: {full_params - cnn_params:,} parameters ({(full_params - cnn_params) / full_params * 100:.1f}%)")
     print("="*80)

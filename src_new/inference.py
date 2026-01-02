@@ -1,6 +1,6 @@
 """
-Inference script for piano transcription model.
-FIXED: Uses fresh 352-bin spectrograms and processes in 3-second chunks to match training.
+Inference script for piano transcription model with onset + duration prediction.
+Visualizes ground truth vs model predictions.
 """
 
 import torch
@@ -12,488 +12,355 @@ import pretty_midi
 import json
 from pathlib import Path
 
-from model import PianoTranscriptionModel, PianoTranscriptionModelLegacy
-from config import CONFIG, NUM_OUTPUTS, MIN_PITCH
-from data_preparation import build_binary_piano_roll_with_pedals
+from model import PianoTranscriptionModel
+from config import CONFIG, MIN_PITCH
+from data_preparation import create_piano_roll_with_onsets_durations, DURATION_BINS, NUM_DURATION_BINS, get_duration_bin_label
 from inference_config import INFERENCE_CONFIG
+from dataset import duration_to_log_duration, log_duration_to_duration
 
 
-def preprocess_audio_to_spectrogram_inference(audio_path, n_mels, n_fft, hop_length, sample_rate):
+def load_model(model_path, device):
+    """Load trained model from checkpoint."""
+    model_dir = os.path.dirname(model_path)
+    config_path = os.path.join(model_dir, "config.json")
+    
+    # Load config if available
+    model_config = CONFIG.copy()
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            saved_config = json.load(f)
+            model_config.update(saved_config)
+            print(f"✓ Loaded config from {config_path}")
+    else:
+        print("⚠️  No config.json found, using default CONFIG")
+    
+    # Create model
+    model = PianoTranscriptionModel(
+        input_features=model_config.get('n_mels', 352),
+        num_keys=model_config.get('num_keys', 88),
+        transformer_dim=model_config.get('hidden_size', 256),
+        num_heads=model_config.get('num_heads', 8),
+        num_layers=model_config.get('num_layers', 4),
+        dropout=model_config.get('dropout', 0.2),
+        duration_mode=model_config.get('duration_mode', 'log'),
+        num_duration_bins=model_config.get('num_duration_bins', 8)
+    ).to(device)
+    
+    # Load weights
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.eval()
+    
+    print(f"✓ Model loaded from {model_path}")
+    print(f"  Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"  Duration mode: {model_config.get('duration_mode', 'log')}")
+    
+    return model, model_config
+
+
+def preprocess_audio_to_spectrogram(audio_path, config):
     """
-    Convert audio to Mel-spectrogram using the EXACT same parameters as training.
-    Uses fresh computation with current config settings.
+    Convert audio to Mel-spectrogram using same parameters as training.
     
     Args:
         audio_path (str): Path to audio file
-        n_mels (int): Number of mel bins
-        n_fft (int): FFT window size
-        hop_length (int): Hop length
-        sample_rate (int): Sample rate
+        config (dict): Model config with spectrogram parameters
         
     Returns:
         np.ndarray: Mel-spectrogram of shape (n_mels, time_frames)
     """
-    print(f"Computing fresh spectrogram with:")
-    print(f"  n_mels: {n_mels}")
-    print(f"  n_fft: {n_fft}")
-    print(f"  hop_length: {hop_length}")
-    print(f"  sample_rate: {sample_rate}")
+    print(f"Computing spectrogram...")
     
     # Load audio
-    audio, _ = librosa.load(audio_path, sr=sample_rate)
+    audio, _ = librosa.load(audio_path, sr=config['sample_rate'])
     
     # Compute Mel-spectrogram
     mel_spectrogram = librosa.feature.melspectrogram(
-        y=audio, sr=sample_rate, n_fft=n_fft, hop_length=hop_length, n_mels=n_mels
+        y=audio, 
+        sr=config['sample_rate'], 
+        n_fft=config['n_fft'], 
+        hop_length=config['hop_length'], 
+        n_mels=config['n_mels']
     )
     
-    # Convert to log scale - SAME AS TRAINING
+    # Convert to log scale
     log_mel_spectrogram = librosa.power_to_db(mel_spectrogram, ref=np.max)
+    
+    print(f"  Spectrogram shape: {log_mel_spectrogram.shape}")
     
     return log_mel_spectrogram
 
 
-def extract_time_range(spectrogram, piano_roll, start_time, end_time, fps, hop_length, sample_rate):
-    """Extract a time range from spectrogram and piano roll."""
-    # Calculate frame indices for spectrogram (based on hop_length)
+def extract_time_range(spectrogram, labels, start_time, end_time, fps, hop_length, sample_rate):
+    """Extract a time range from spectrogram and labels."""
+    # Calculate frame indices for spectrogram
     spec_start_frame = int(start_time * sample_rate / hop_length)
     spec_end_frame = int(end_time * sample_rate / hop_length)
     
     # Extract spectrogram snippet
     spectrogram_snippet = spectrogram[:, spec_start_frame:spec_end_frame]
     
-    # Extract piano roll snippet if available
-    piano_roll_snippet = None
-    if piano_roll is not None:
-        roll_start_frame = int(start_time * fps)
-        roll_end_frame = int(end_time * fps)
-        piano_roll_snippet = piano_roll[roll_start_frame:roll_end_frame, :]
+    # Extract label snippets
+    labels_snippet = None
+    if labels is not None:
+        label_start_frame = int(start_time * fps)
+        label_end_frame = int(end_time * fps)
+        labels_snippet = {
+            'onset': labels['onset'][label_start_frame:label_end_frame, :],
+            'duration': labels['duration'][label_start_frame:label_end_frame, :],
+            'frame': labels['frame'][label_start_frame:label_end_frame, :],
+            'pedal': labels['pedal'][label_start_frame:label_end_frame, :]
+        }
     
-    return spectrogram_snippet, piano_roll_snippet
+    return spectrogram_snippet, labels_snippet
 
 
-def run_inference_chunked(model, spectrogram, device, chunk_frames=300):
+def run_inference(model, spectrogram, device, config):
     """
-    Run inference in chunks (like training) to avoid temporal degradation.
+    Run inference on spectrogram.
     
     Args:
         model: Trained model
-        spectrogram (np.ndarray): Full spectrogram (n_mels, time_frames)
+        spectrogram (np.ndarray): Spectrogram (n_mels, time_frames)
         device: torch device
-        chunk_frames (int): Number of frames per chunk (should match training snippet_frames)
+        config: Model config
         
     Returns:
-        np.ndarray: Model predictions of shape (time_frames, num_outputs)
+        Dictionary with 'onset', 'duration', 'frame' predictions
     """
-    n_mels, total_frames = spectrogram.shape
-    predictions = []
+    print(f"Running inference...")
     
-    print(f"Running inference in {chunk_frames}-frame chunks...")
-    
-    # Process in chunks with overlap to avoid edge effects
-    overlap = chunk_frames // 4  # 25% overlap
-    stride = chunk_frames - overlap
-    
-    for start_idx in range(0, total_frames, stride):
-        end_idx = min(start_idx + chunk_frames, total_frames)
-        
-        # Extract chunk
-        chunk = spectrogram[:, start_idx:end_idx]
-        
-        # Pad if needed
-        if chunk.shape[1] < chunk_frames:
-            padding = chunk_frames - chunk.shape[1]
-            chunk = np.pad(chunk, ((0, 0), (0, padding)), mode='constant', constant_values=0)
-        
-        # Normalize chunk individually (LIKE TRAINING)
-        chunk_normalized = librosa.power_to_db(
-            librosa.db_to_power(chunk), 
-            ref=np.max(librosa.db_to_power(chunk))
-        )
-        
-        # Convert to tensor
-        chunk_tensor = torch.tensor(chunk_normalized, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-        chunk_tensor = chunk_tensor.to(device)
-        
-        # Run inference
-        with torch.no_grad():
-            chunk_pred = model(chunk_tensor)[0].cpu().numpy()  # (chunk_frames, num_outputs)
-        
-        # Take only non-overlapping part (or trim padding)
-        if start_idx + stride >= total_frames:
-            # Last chunk - take what we need
-            take_frames = total_frames - start_idx
-            predictions.append(chunk_pred[:take_frames])
-        else:
-            # Regular chunk - take non-overlapping part
-            predictions.append(chunk_pred[:stride])
-    
-    return np.concatenate(predictions, axis=0)
-
-
-def run_inference(model, spectrogram, device):
-    """
-    Run inference on a spectrogram snippet (single pass).
-    
-    Args:
-        model: Trained model
-        spectrogram (np.ndarray): Spectrogram of shape (n_mels, time_frames)
-        device: torch device
-        
-    Returns:
-        np.ndarray: Model predictions of shape (time_frames, num_outputs)
-    """
-    # Convert to tensor and add batch dimension
-    spectrogram_tensor = torch.tensor(spectrogram, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
-    spectrogram_tensor = spectrogram_tensor.to(device)
-    
-    # Run inference
-    with torch.no_grad():
-        predictions = model(spectrogram_tensor)[0].cpu().numpy()
-    
-    return predictions
-
-
-def load_model(model_path, device):
-    """Load model - automatically detects legacy vs new architecture."""
-    model_dir = os.path.dirname(model_path)
-    config_path = os.path.join(model_dir, "config.json")
-    
-    use_legacy = False
-    model_config = CONFIG.copy()
-    
-    if os.path.exists(config_path):
-        with open(config_path, 'r') as f:
-            saved_config = json.load(f)
-            if 'preload_into_ram' not in saved_config and 'use_cnn_only' not in saved_config:
-                use_legacy = True
-                print("⚠️  Detected LEGACY model (training_run_001-008)")
-            model_config.update(saved_config)
-    else:
-        print("⚠️  No config.json found, assuming legacy model")
-        use_legacy = True
-    
-    # Create appropriate model
-    if use_legacy:
-        print("Loading with PianoTranscriptionModelLegacy...")
-        model = PianoTranscriptionModelLegacy(
-            n_mels=model_config.get('n_mels', 352),
-            hidden_size=model_config.get('hidden_size', 256),
-            num_heads=model_config.get('num_heads', 8),
-            num_layers=model_config.get('num_layers', 4),
-            num_outputs=NUM_OUTPUTS,
-            dropout=model_config.get('dropout', 0.2)
-        ).to(device)
-    else:
-        print("Loading with PianoTranscriptionModel (new architecture)...")
-        model = PianoTranscriptionModel(
-            n_mels=model_config.get('n_mels', 352),
-            hidden_size=model_config.get('hidden_size', 256),
-            num_heads=model_config.get('num_heads', 8),
-            num_layers=model_config.get('num_layers', 4),
-            num_outputs=NUM_OUTPUTS,
-            dropout=model_config.get('dropout', 0.2)
-        ).to(device)
-    
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-    
-    print(f"✓ Model loaded from {model_path}")
-    print(f"  Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"  n_mels: {model_config.get('n_mels', 352)}")
-    
-    return model, model_config
-
-
-def visualize_results(predictions, ground_truth, save_path, start_time, end_time, plot_full_range=True):
-    """
-    Visualize model predictions vs ground truth.
-    
-    Args:
-        predictions (np.ndarray): Model predictions (time_frames, num_outputs)
-        ground_truth (np.ndarray): Ground truth piano roll (time_frames, num_outputs) or None
-        save_path (str): Path to save the visualization
-        start_time (float): Start time in seconds
-        end_time (float): End time in seconds
-        plot_full_range (bool): If True, plot all 91 outputs; if False, focus on active range
-    """
-    duration = end_time - start_time
-    
-    if ground_truth is not None:
-        # Plot both ground truth and predictions
-        fig, axes = plt.subplots(2, 1, figsize=(16, 10))
-        
-        axes[0].imshow(ground_truth.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        axes[0].set_title(f'Ground Truth ({start_time:.1f}s - {end_time:.1f}s)', fontsize=14, fontweight='bold')
-        axes[0].set_xlabel('Time Frames', fontsize=12)
-        axes[0].set_ylabel('Piano Keys + Pedals', fontsize=12)
-        
-        # Add horizontal lines to separate keys from pedals
-        axes[0].axhline(y=87.5, color='cyan', linestyle='--', linewidth=1, alpha=0.7, label='Keys/Pedals boundary')
-        axes[0].legend(loc='upper right')
-        
-        axes[1].imshow(predictions.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        axes[1].set_title(f'Model Predictions ({start_time:.1f}s - {end_time:.1f}s)', fontsize=14, fontweight='bold')
-        axes[1].set_xlabel('Time Frames', fontsize=12)
-        axes[1].set_ylabel('Piano Keys + Pedals', fontsize=12)
-        
-        # Add horizontal lines to separate keys from pedals
-        axes[1].axhline(y=87.5, color='cyan', linestyle='--', linewidth=1, alpha=0.7, label='Keys/Pedals boundary')
-        axes[1].legend(loc='upper right')
-        
-    else:
-        # Plot only predictions
-        fig, ax = plt.subplots(1, 1, figsize=(16, 6))
-        
-        ax.imshow(predictions.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        ax.set_title(f'Model Predictions ({start_time:.1f}s - {end_time:.1f}s)', fontsize=14, fontweight='bold')
-        ax.set_xlabel('Time Frames', fontsize=12)
-        ax.set_ylabel('Piano Keys + Pedals', fontsize=12)
-        
-        # Add horizontal lines to separate keys from pedals
-        ax.axhline(y=87.5, color='cyan', linestyle='--', linewidth=1, alpha=0.7, label='Keys/Pedals boundary')
-        ax.legend(loc='upper right')
-    
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    plt.close()
-    print(f"Visualization saved to {save_path}")
-
-
-def calculate_metrics(predictions, ground_truth, threshold=0.5):
-    """
-    Calculate precision, recall, and F1 score.
-    
-    Args:
-        predictions (np.ndarray): Model predictions (time_frames, num_outputs)
-        ground_truth (np.ndarray): Ground truth (time_frames, num_outputs)
-        threshold (float): Threshold for binary classification
-        
-    Returns:
-        dict: Metrics dictionary
-    """
-    pred_binary = (predictions > threshold).astype(np.float32)
-    
-    tp = np.sum(pred_binary * ground_truth)
-    fp = np.sum(pred_binary * (1 - ground_truth))
-    fn = np.sum((1 - pred_binary) * ground_truth)
-    
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
-    
-    return {
-        'precision': precision,
-        'recall': recall,
-        'f1': f1
-    }
-
-
-def inference_on_audio(model, audio_path, device, sr=16000, hop_length=512, threshold=0.5):
-    """
-    Run inference on an audio file with onset/offset/frame predictions.
-    
-    Args:
-        model: Trained PianoTranscriptionModel
-        audio_path: Path to audio file
-        device: torch device
-        sr: Sample rate
-        hop_length: Hop length for STFT
-        threshold: Threshold for binary predictions
-    
-    Returns:
-        Dictionary with 'onset', 'offset', 'frame' predictions and reconstructed MIDI
-    """
-    model.eval()
-    
-    # Load audio and compute spectrogram
-    y, _ = librosa.load(audio_path, sr=sr)
-    spec = librosa.stft(y, n_fft=2048, hop_length=hop_length)
-    spec_db = librosa.amplitude_to_db(np.abs(spec), ref=np.max)
-    
-    # Prepare input
-    spec_tensor = torch.FloatTensor(spec_db).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, freq, time)
+    # Convert to tensor
+    spec_tensor = torch.FloatTensor(spectrogram).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, n_mels, time)
     
     # Run inference
     with torch.no_grad():
         predictions = model(spec_tensor)
     
-    # Apply sigmoid and threshold
+    # Process predictions based on duration mode
     onset_pred = torch.sigmoid(predictions['onset']).squeeze(0).cpu().numpy()  # (time, 88)
-    offset_pred = torch.sigmoid(predictions['offset']).squeeze(0).cpu().numpy()  # (time, 88)
     frame_pred = torch.sigmoid(predictions['frame']).squeeze(0).cpu().numpy()  # (time, 88)
     
-    onset_binary = (onset_pred > threshold).astype(np.uint8)
-    offset_binary = (offset_pred > threshold).astype(np.uint8)
-    frame_binary = (frame_pred > threshold).astype(np.uint8)
+    duration_mode = config.get('duration_mode', 'log')
     
-    # Reconstruct MIDI from onset/offset/frame predictions
-    midi_data = reconstruct_midi_from_predictions(
-        onset_binary, offset_binary, frame_binary,
-        fps=sr / hop_length
-    )
+    if duration_mode == 'bins':
+        # Classification: take argmax over bins
+        duration_logits = predictions['duration'].squeeze(0).cpu()  # (time, 88, num_bins)
+        duration_bins = torch.argmax(duration_logits, dim=-1).numpy()  # (time, 88)
+        # Convert bins to actual durations (use bin centers)
+        duration_pred = np.zeros_like(duration_bins, dtype=float)
+        for i in range(NUM_DURATION_BINS):
+            mask = duration_bins == i
+            bin_center = (DURATION_BINS[i] + DURATION_BINS[i+1]) / 2
+            if np.isinf(DURATION_BINS[i+1]):
+                bin_center = DURATION_BINS[i] + 1.0
+            duration_pred[mask] = bin_center
+    
+    elif duration_mode == 'log':
+        # Regression: convert log-duration back to duration
+        log_duration_pred = predictions['duration'].squeeze(0).cpu().numpy()  # (time, 88)
+        duration_pred = log_duration_to_duration(log_duration_pred)  # Convert back
+    
+    else:  # linear
+        # Regression: use as-is
+        duration_pred = predictions['duration'].squeeze(0).cpu().numpy()  # (time, 88)
+    
+    print(f"  Predictions shape: onset={onset_pred.shape}, duration={duration_pred.shape}, frame={frame_pred.shape}")
     
     return {
         'onset': onset_pred,
-        'offset': offset_pred,
-        'frame': frame_pred,
-        'onset_binary': onset_binary,
-        'offset_binary': offset_binary,
-        'frame_binary': frame_binary,
-        'midi': midi_data
+        'duration': duration_pred,
+        'frame': frame_pred
     }
 
 
-def reconstruct_midi_from_predictions(onset, offset, frame, fps=100, min_duration=0.05):
+def visualize_comparison(ground_truth, predictions, save_path, start_time, end_time, fps=100):
     """
-    Reconstruct MIDI from onset/offset/frame predictions.
+    Visualize ground truth vs predictions side by side.
     
     Args:
-        onset: Binary onset predictions (time, 88)
-        offset: Binary offset predictions (time, 88)
-        frame: Binary frame predictions (time, 88)
+        ground_truth: Dict with 'onset', 'duration', 'frame', 'pedal' (or None)
+        predictions: Dict with 'onset', 'duration', 'frame'
+        save_path: Path to save visualization
+        start_time: Start time in seconds
+        end_time: End time in seconds
         fps: Frames per second
-        min_duration: Minimum note duration in seconds
-    
-    Returns:
-        pretty_midi.PrettyMIDI object
     """
-    pm = pretty_midi.PrettyMIDI()
-    piano = pretty_midi.Instrument(program=0)  # Acoustic Grand Piano
+    duration = end_time - start_time
     
-    min_frames = int(min_duration * fps)
-    
-    # Process each pitch
-    for pitch_idx in range(88):
-        pitch = pitch_idx + 21  # MIDI pitch (A0 = 21)
+    if ground_truth is not None:
+        # Plot ground truth and predictions side by side
+        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
         
-        # Find onsets for this pitch
-        onset_frames = np.where(onset[:, pitch_idx] == 1)[0]
+        # Ground truth
+        # Panel 1: Onset + Duration
+        gt_onset = ground_truth['onset']
+        gt_duration = ground_truth['duration']
+        duration_binned = np.zeros_like(gt_duration)
+        for i in range(NUM_DURATION_BINS):
+            mask = (gt_duration >= DURATION_BINS[i]) & (gt_duration < DURATION_BINS[i+1])
+            duration_binned[mask] = i
+        onset_duration_combined = duration_binned.astype(float).copy()
+        onset_duration_combined[gt_onset == 0] = 0
+        onset_duration_combined[gt_onset == 1] = duration_binned[gt_onset == 1] + 1
         
-        for onset_frame in onset_frames:
-            # Find the corresponding offset
-            # Look for offset after onset, or when frame becomes 0
-            offset_frame = None
-            
-            # First, check if there's an explicit offset detection
-            offset_candidates = np.where(offset[onset_frame:, pitch_idx] == 1)[0]
-            if len(offset_candidates) > 0:
-                offset_frame = onset_frame + offset_candidates[0]
-            
-            # Otherwise, use frame predictions to determine end
-            if offset_frame is None:
-                # Find where frame becomes 0 after onset
-                frame_end_candidates = np.where(frame[onset_frame:, pitch_idx] == 0)[0]
-                if len(frame_end_candidates) > 0:
-                    offset_frame = onset_frame + frame_end_candidates[0]
-                else:
-                    # Note extends to end of audio
-                    offset_frame = len(frame) - 1
-            
-            # Ensure minimum duration
-            if offset_frame - onset_frame < min_frames:
-                offset_frame = onset_frame + min_frames
-            
-            # Convert frames to time
-            start_time = onset_frame / fps
-            end_time = offset_frame / fps
-            
-            # Create MIDI note
-            note = pretty_midi.Note(
-                velocity=80,
-                pitch=pitch,
-                start=start_time,
-                end=end_time
-            )
-            piano.notes.append(note)
-    
-    pm.instruments.append(piano)
-    return pm
-
-
-def save_predictions_visualization(predictions, output_path, duration_seconds=10):
-    """
-    Visualize onset, offset, and frame predictions.
-    
-    Args:
-        predictions: Dictionary with prediction arrays
-        output_path: Path to save visualization
-        duration_seconds: Duration to visualize (from start)
-    """
-    import matplotlib.pyplot as plt
-    
-    onset = predictions['onset_binary']
-    offset = predictions['offset_binary']
-    frame = predictions['frame_binary']
-    
-    # Limit to specified duration
-    max_frames = min(onset.shape[0], int(duration_seconds * 100))  # Assuming 100 fps
-    onset = onset[:max_frames, :]
-    offset = offset[:max_frames, :]
-    frame = frame[:max_frames, :]
-    
-    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
-    
-    # Plot onset
-    axes[0].imshow(onset.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[0].set_ylabel('Piano Keys (88)')
-    axes[0].set_title('Onset Predictions')
-    
-    # Plot offset
-    axes[1].imshow(offset.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[1].set_ylabel('Piano Keys (88)')
-    axes[1].set_title('Offset Predictions')
-    
-    # Plot frame
-    axes[2].imshow(frame.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[2].set_ylabel('Piano Keys (88)')
-    axes[2].set_title('Frame Predictions (Active Notes)')
-    axes[2].set_xlabel('Time Frames')
+        im1 = axes[0, 0].imshow(onset_duration_combined.T, aspect='auto', origin='lower', 
+                                cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
+        axes[0, 0].set_title(f'Ground Truth: Onsets + Duration', fontsize=12, fontweight='bold')
+        axes[0, 0].set_ylabel('Piano Keys (88)', fontsize=10)
+        cbar1 = plt.colorbar(im1, ax=axes[0, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
+        tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
+        cbar1.ax.set_yticklabels(tick_labels, fontsize=7)
+        
+        # Panel 2: Frame
+        axes[0, 1].imshow(ground_truth['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        axes[0, 1].set_title(f'Ground Truth: Frame', fontsize=12, fontweight='bold')
+        axes[0, 1].set_ylabel('Piano Keys (88)', fontsize=10)
+        
+        # Panel 3: Pedal
+        axes[0, 2].imshow(ground_truth['pedal'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        axes[0, 2].set_title(f'Ground Truth: Pedal', fontsize=12, fontweight='bold')
+        axes[0, 2].set_ylabel('Pedal', fontsize=10)
+        
+        # Predictions
+        # Panel 4: Onset + Duration
+        pred_onset = predictions['onset']
+        pred_duration = predictions['duration']
+        pred_duration_binned = np.zeros_like(pred_duration)
+        for i in range(NUM_DURATION_BINS):
+            mask = (pred_duration >= DURATION_BINS[i]) & (pred_duration < DURATION_BINS[i+1])
+            pred_duration_binned[mask] = i
+        pred_onset_duration_combined = pred_duration_binned.astype(float).copy()
+        pred_onset_duration_combined[pred_onset < 0.5] = 0
+        pred_onset_duration_combined[pred_onset >= 0.5] = pred_duration_binned[pred_onset >= 0.5] + 1
+        
+        im2 = axes[1, 0].imshow(pred_onset_duration_combined.T, aspect='auto', origin='lower', 
+                                cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
+        axes[1, 0].set_title(f'Predicted: Onsets + Duration', fontsize=12, fontweight='bold')
+        axes[1, 0].set_ylabel('Piano Keys (88)', fontsize=10)
+        axes[1, 0].set_xlabel('Time Frames', fontsize=10)
+        cbar2 = plt.colorbar(im2, ax=axes[1, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
+        cbar2.ax.set_yticklabels(tick_labels, fontsize=7)
+        
+        # Panel 5: Frame
+        axes[1, 1].imshow(predictions['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        axes[1, 1].set_title(f'Predicted: Frame', fontsize=12, fontweight='bold')
+        axes[1, 1].set_ylabel('Piano Keys (88)', fontsize=10)
+        axes[1, 1].set_xlabel('Time Frames', fontsize=10)
+        
+        # Panel 6: Stats
+        axes[1, 2].axis('off')
+        stats_text = f"Time Range: {start_time:.1f}s - {end_time:.1f}s\n\n"
+        stats_text += f"Ground Truth:\n"
+        stats_text += f"  Total onsets: {np.sum(gt_onset):.0f}\n"
+        if np.sum(gt_onset) > 0:
+            gt_durations = gt_duration[gt_onset == 1]
+            stats_text += f"  Duration range: {gt_durations.min():.3f}s - {gt_durations.max():.3f}s\n"
+            stats_text += f"  Mean duration: {gt_durations.mean():.3f}s\n\n"
+        
+        stats_text += f"Predictions:\n"
+        pred_onset_binary = (pred_onset > 0.5).astype(float)
+        stats_text += f"  Total onsets: {np.sum(pred_onset_binary):.0f}\n"
+        if np.sum(pred_onset_binary) > 0:
+            pred_durations = pred_duration[pred_onset_binary == 1]
+            stats_text += f"  Duration range: {pred_durations.min():.3f}s - {pred_durations.max():.3f}s\n"
+            stats_text += f"  Mean duration: {pred_durations.mean():.3f}s\n\n"
+        
+        # Metrics
+        onset_tp = np.sum(pred_onset_binary * gt_onset)
+        onset_fp = np.sum(pred_onset_binary * (1 - gt_onset))
+        onset_fn = np.sum((1 - pred_onset_binary) * gt_onset)
+        onset_precision = onset_tp / (onset_tp + onset_fp) if (onset_tp + onset_fp) > 0 else 0
+        onset_recall = onset_tp / (onset_tp + onset_fn) if (onset_tp + onset_fn) > 0 else 0
+        onset_f1 = 2 * onset_precision * onset_recall / (onset_precision + onset_recall) if (onset_precision + onset_recall) > 0 else 0
+        
+        stats_text += f"Onset Metrics:\n"
+        stats_text += f"  Precision: {onset_precision:.3f}\n"
+        stats_text += f"  Recall: {onset_recall:.3f}\n"
+        stats_text += f"  F1: {onset_f1:.3f}\n"
+        
+        axes[1, 2].text(0.1, 0.5, stats_text, fontsize=10, verticalalignment='center', 
+                       family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+    else:
+        # Plot only predictions
+        fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+        
+        # Panel 1: Onset + Duration
+        pred_onset = predictions['onset']
+        pred_duration = predictions['duration']
+        pred_duration_binned = np.zeros_like(pred_duration)
+        for i in range(NUM_DURATION_BINS):
+            mask = (pred_duration >= DURATION_BINS[i]) & (pred_duration < DURATION_BINS[i+1])
+            pred_duration_binned[mask] = i
+        pred_onset_duration_combined = pred_duration_binned.astype(float).copy()
+        pred_onset_duration_combined[pred_onset < 0.5] = 0
+        pred_onset_duration_combined[pred_onset >= 0.5] = pred_duration_binned[pred_onset >= 0.5] + 1
+        
+        im = axes[0].imshow(pred_onset_duration_combined.T, aspect='auto', origin='lower', 
+                           cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
+        axes[0].set_title(f'Predicted: Onsets + Duration', fontsize=12, fontweight='bold')
+        axes[0].set_ylabel('Piano Keys (88)', fontsize=10)
+        axes[0].set_xlabel('Time Frames', fontsize=10)
+        cbar = plt.colorbar(im, ax=axes[0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
+        tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
+        cbar.ax.set_yticklabels(tick_labels, fontsize=7)
+        
+        # Panel 2: Frame
+        axes[1].imshow(predictions['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        axes[1].set_title(f'Predicted: Frame', fontsize=12, fontweight='bold')
+        axes[1].set_ylabel('Piano Keys (88)', fontsize=10)
+        axes[1].set_xlabel('Time Frames', fontsize=10)
+        
+        # Panel 3: Stats
+        axes[2].axis('off')
+        pred_onset_binary = (pred_onset > 0.5).astype(float)
+        stats_text = f"Time Range: {start_time:.1f}s - {end_time:.1f}s\n\n"
+        stats_text += f"Predictions:\n"
+        stats_text += f"  Total onsets: {np.sum(pred_onset_binary):.0f}\n"
+        if np.sum(pred_onset_binary) > 0:
+            pred_durations = pred_duration[pred_onset_binary == 1]
+            stats_text += f"  Duration range: {pred_durations.min():.3f}s - {pred_durations.max():.3f}s\n"
+            stats_text += f"  Mean duration: {pred_durations.mean():.3f}s\n"
+        
+        axes[2].text(0.1, 0.5, stats_text, fontsize=10, verticalalignment='center',
+                    family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
     
     plt.tight_layout()
-    plt.savefig(output_path, dpi=150)
+    plt.savefig(save_path, dpi=150)
     plt.close()
-    print(f"Visualization saved to {output_path}")
+    print(f"✓ Visualization saved to {save_path}")
 
 
 def main():
-    """Main inference function with fresh spectrogram computation."""
+    """Main inference function."""
     device = torch.device('mps' if torch.backends.mps.is_available() else 
                          'cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}\n")
     
     os.makedirs(INFERENCE_CONFIG['output_dir'], exist_ok=True)
     
-    # Load model and get its config
+    # Load model
     model, model_config = load_model(INFERENCE_CONFIG['model_path'], device)
     
-    # Use model's config for spectrogram parameters
-    n_mels = model_config.get('n_mels', 352)
-    n_fft = model_config.get('n_fft', 4096)
-    hop_length = model_config.get('hop_length', 480)
-    sample_rate = model_config.get('sample_rate', 48000)
-    snippet_frames = model_config.get('snippet_frames', 300)
-    
-    # Compute FRESH spectrogram with correct parameters
+    # Process audio
     print(f"\n{'='*80}")
     print(f"Processing audio: {INFERENCE_CONFIG['audio_path']}")
     print(f"{'='*80}")
-    full_spectrogram = preprocess_audio_to_spectrogram_inference(
+    full_spectrogram = preprocess_audio_to_spectrogram(
         INFERENCE_CONFIG['audio_path'],
-        n_mels=n_mels,
-        n_fft=n_fft,
-        hop_length=hop_length,
-        sample_rate=sample_rate
+        model_config
     )
-    print(f"Spectrogram shape: {full_spectrogram.shape}")
     
-    # Process MIDI to piano roll if available
-    full_piano_roll = None
+    # Process MIDI if available
+    full_labels = None
     if INFERENCE_CONFIG['midi_path'] is not None and os.path.exists(INFERENCE_CONFIG['midi_path']):
         print(f"\nProcessing MIDI: {INFERENCE_CONFIG['midi_path']}")
-        midi_data = pretty_midi.PrettyMIDI(INFERENCE_CONFIG['midi_path'])
-        full_piano_roll = build_binary_piano_roll_with_pedals(midi_data, roll_fps=CONFIG['roll_fps'])
-        print(f"Piano roll shape: {full_piano_roll.shape}")
+        full_labels = create_piano_roll_with_onsets_durations(
+            INFERENCE_CONFIG['midi_path'],
+            fps=model_config['roll_fps'],
+            onset_frames=model_config.get('onset_frames', 2)
+        )
+        print(f"  Labels shape: onset={full_labels['onset'].shape}")
     
     # Extract time range
     start_time = INFERENCE_CONFIG['start_time']
@@ -502,56 +369,38 @@ def main():
     print(f"Extracting time range: {start_time}s - {end_time}s")
     print(f"{'='*80}")
     
-    spectrogram_snippet, piano_roll_snippet = extract_time_range(
+    spectrogram_snippet, labels_snippet = extract_time_range(
         full_spectrogram,
-        full_piano_roll,
+        full_labels,
         start_time,
         end_time,
-        CONFIG['roll_fps'],
-        hop_length,
-        sample_rate
+        model_config['roll_fps'],
+        model_config['hop_length'],
+        model_config['sample_rate']
     )
     
-    print(f"Spectrogram snippet shape: {spectrogram_snippet.shape}")
-    if piano_roll_snippet is not None:
-        print(f"Piano roll snippet shape: {piano_roll_snippet.shape}")
+    print(f"  Spectrogram snippet shape: {spectrogram_snippet.shape}")
+    if labels_snippet is not None:
+        print(f"  Labels snippet shape: onset={labels_snippet['onset'].shape}")
     
-    # Run inference in chunks (like training) to avoid temporal degradation
+    # Run inference
     print(f"\n{'='*80}")
-    print(f"Running inference...")
+    predictions = run_inference(model, spectrogram_snippet, device, model_config)
     print(f"{'='*80}")
-    predictions = run_inference_chunked(
-        model, 
-        spectrogram_snippet, 
-        device, 
-        chunk_frames=snippet_frames
-    )
-    print(f"Predictions shape: {predictions.shape}")
-    
-    # Calculate metrics
-    if piano_roll_snippet is not None:
-        metrics = calculate_metrics(predictions, piano_roll_snippet)
-        print(f"\n{'='*80}")
-        print(f"METRICS")
-        print(f"{'='*80}")
-        print(f"  Precision: {metrics['precision']:.4f}")
-        print(f"  Recall:    {metrics['recall']:.4f}")
-        print(f"  F1 Score:  {metrics['f1']:.4f}")
-        print(f"{'='*80}")
     
     # Visualize
     output_filename = os.path.join(
         INFERENCE_CONFIG['output_dir'],
-        f"inference_{start_time:.1f}s_{end_time:.1f}s_chunked.png"
+        f"inference_{start_time:.1f}s_{end_time:.1f}s.png"
     )
     
-    visualize_results(
+    visualize_comparison(
+        labels_snippet,
         predictions,
-        piano_roll_snippet,
         output_filename,
         start_time,
         end_time,
-        plot_full_range=INFERENCE_CONFIG['plot_full_range']
+        model_config['roll_fps']
     )
     
     print(f"\n✓ Inference complete!")

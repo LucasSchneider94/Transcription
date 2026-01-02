@@ -1,6 +1,7 @@
 """
 Dataset class for piano transcription training.
 Optimized version with RAM pre-loading for faster training.
+Uses onset + duration approach instead of onset + offset.
 """
 
 import torch
@@ -11,15 +12,61 @@ from tqdm import tqdm
 import pickle
 from pathlib import Path
 
+# Duration bin edges (in seconds) - logarithmic scale
+# Must match data_preparation.py
+DURATION_BINS = np.array([0.0, 0.05, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, np.inf])
+NUM_DURATION_BINS = len(DURATION_BINS) - 1  # 8 bins
+
+def duration_to_bin(duration):
+    """
+    Convert duration in seconds to bin index.
+    
+    Args:
+        duration: Duration in seconds (scalar or array)
+        
+    Returns:
+        Bin index (0 to NUM_DURATION_BINS-1)
+    """
+    duration = np.asarray(duration)
+    bins = np.digitize(duration, DURATION_BINS[1:-1])  # Returns 0 to NUM_DURATION_BINS-1
+    return bins
+
+def duration_to_log_duration(duration, eps=1e-6):
+    """
+    Convert duration to log-duration for regression.
+    Uses log(duration + eps) for numerical stability.
+    
+    Args:
+        duration: Duration in seconds (scalar or array)
+        eps: Small epsilon to avoid log(0)
+        
+    Returns:
+        Log-duration
+    """
+    return np.log(np.maximum(duration, eps))
+
+def log_duration_to_duration(log_duration):
+    """
+    Convert log-duration back to duration.
+    
+    Args:
+        log_duration: Log-duration values
+        
+    Returns:
+        Duration in seconds
+    """
+    return np.exp(log_duration)
+
 
 class PianoTranscriptionDataset(Dataset):
     """
-    Dataset for piano transcription with onset, offset, and frame labels.
+    Dataset for piano transcription with onset, duration, and frame labels.
     Loads from .npz files and generates random snippets.
     """
     def __init__(self, data_dir, snippet_frames, snippets_per_file=20, 
                  file_indices=None, file_list=None, seed=42, 
-                 fixed_snippets=False, preload_into_ram=False):
+                 fixed_snippets=False, preload_into_ram=False,
+                 duration_mode='bins'):
         """
         Args:
             data_dir: Directory containing .npz files
@@ -30,12 +77,14 @@ class PianoTranscriptionDataset(Dataset):
             seed: Random seed for reproducibility
             fixed_snippets: If True, use fixed snippet positions
             preload_into_ram: If True, load all data into RAM
+            duration_mode: 'bins' for classification, 'log' for log-duration regression, 'linear' for linear regression
         """
         self.data_dir = data_dir
         self.snippet_frames = snippet_frames
         self.snippets_per_file = snippets_per_file
         self.fixed_snippets = fixed_snippets
         self.preload_into_ram = preload_into_ram
+        self.duration_mode = duration_mode
         
         # Get file list
         if file_list is not None and file_indices is not None:
@@ -56,7 +105,7 @@ class PianoTranscriptionDataset(Dataset):
                 self.data_cache[file_path] = {
                     'spectrogram': data['spectrogram'],
                     'onset': data['onset'],
-                    'offset': data['offset'],
+                    'duration': data['duration'],
                     'frame': data['frame'],
                     'pedal': data['pedal']
                 }
@@ -71,7 +120,7 @@ class PianoTranscriptionDataset(Dataset):
             Dictionary with:
                 'spectrogram': (n_mels, snippet_frames)
                 'onset': (snippet_frames, 88)
-                'offset': (snippet_frames, 88)
+                'duration': (snippet_frames, 88) - format depends on duration_mode
                 'frame': (snippet_frames, 88)
                 'pedal': (snippet_frames, 1)
         """
@@ -86,14 +135,14 @@ class PianoTranscriptionDataset(Dataset):
             data = self.data_cache[file_path]
             spectrogram = data['spectrogram']
             onset = data['onset']
-            offset = data['offset']
+            duration = data['duration']
             frame = data['frame']
             pedal = data['pedal']
         else:
             data = np.load(file_path)
             spectrogram = data['spectrogram']
             onset = data['onset']
-            offset = data['offset']
+            duration = data['duration']
             frame = data['frame']
             pedal = data['pedal']
         
@@ -105,7 +154,7 @@ class PianoTranscriptionDataset(Dataset):
             pad_frames = self.snippet_frames - total_frames
             spectrogram = np.pad(spectrogram, ((0, 0), (0, pad_frames)), mode='constant')
             onset = np.pad(onset, ((0, pad_frames), (0, 0)), mode='constant')
-            offset = np.pad(offset, ((0, pad_frames), (0, 0)), mode='constant')
+            duration = np.pad(duration, ((0, pad_frames), (0, 0)), mode='constant')
             frame = np.pad(frame, ((0, pad_frames), (0, 0)), mode='constant')
             pedal = np.pad(pedal, ((0, pad_frames), (0, 0)), mode='constant')
             start_frame = 0
@@ -122,14 +171,27 @@ class PianoTranscriptionDataset(Dataset):
             end_frame = start_frame + self.snippet_frames
             spectrogram = spectrogram[:, start_frame:end_frame]
             onset = onset[start_frame:end_frame, :]
-            offset = offset[start_frame:end_frame, :]
+            duration = duration[start_frame:end_frame, :]
             frame = frame[start_frame:end_frame, :]
             pedal = pedal[start_frame:end_frame, :]
+        
+        # Process duration based on mode
+        if self.duration_mode == 'bins':
+            # Convert exact durations to bin indices for classification
+            duration_processed = duration_to_bin(duration).astype(np.int64)
+        elif self.duration_mode == 'log':
+            # Convert to log-duration for regression
+            duration_processed = duration_to_log_duration(duration).astype(np.float32)
+        elif self.duration_mode == 'linear':
+            # Keep as-is for linear regression
+            duration_processed = duration.astype(np.float32)
+        else:
+            raise ValueError(f"Unknown duration_mode: {self.duration_mode}")
         
         return {
             'spectrogram': torch.FloatTensor(spectrogram),
             'onset': torch.FloatTensor(onset),
-            'offset': torch.FloatTensor(offset),
+            'duration': torch.from_numpy(duration_processed),
             'frame': torch.FloatTensor(frame),
             'pedal': torch.FloatTensor(pedal)
         }
