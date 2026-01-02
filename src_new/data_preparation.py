@@ -2,14 +2,12 @@ import os
 import pretty_midi
 import numpy as np
 import librosa
-import soundfile as sf
 from tqdm import tqdm
-import scipy.sparse as sp
 import matplotlib.pyplot as plt
 from config import CONFIG, MIN_PITCH, MAX_PITCH, NUM_PEDALS
 from pathlib import Path
 import pickle
-from typing import Tuple, Dict
+from typing import Dict
 
 # Use CONFIG values globally throughout the script
 ROLL_FPS = CONFIG['roll_fps']

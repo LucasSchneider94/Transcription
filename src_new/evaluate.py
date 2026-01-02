@@ -1,6 +1,5 @@
 import os
 import torch
-import numpy as np
 import matplotlib.pyplot as plt
 from model import TranscriptionModel
 from train import MaestroDataset

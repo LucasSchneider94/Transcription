@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import math
-import torch.nn.functional as F
 from config import CONFIG
 
 class ConvolutionalFeatureExtractorLegacy(nn.Module):

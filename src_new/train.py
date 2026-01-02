@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 import numpy as np
 import os
 import json
@@ -17,7 +18,6 @@ from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly
 from dataset import PianoTranscriptionDataset
 from utils import (
     get_next_run_folder,
-    compute_metrics,
     visualize_predictions,
     plot_training_curves,
     save_checkpoint,
@@ -92,6 +92,39 @@ class TemporalConsistencyLoss(nn.Module):
             'frame_after_offset': frame_after_offset_loss.item(),
             'offset_without_frame': offset_without_frame_loss.item()
         }
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance without biasing the model.
+    Automatically down-weights easy examples (abundant zeros) and focuses on hard examples.
+    
+    From: Lin et al. "Focal Loss for Dense Object Detection" (2017)
+    """
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super(FocalLoss, self).__init__()
+        self.alpha = alpha  # Weighting factor (0.25 means 25% weight on positive class)
+        self.gamma = gamma  # Focusing parameter (2.0 is standard)
+    
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: (batch, time, keys) - logits
+            targets: (batch, time, keys) - binary labels
+        """
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        probs = torch.sigmoid(inputs)
+        
+        # Compute focal term: (1 - p_t)^gamma
+        p_t = probs * targets + (1 - probs) * (1 - targets)
+        focal_weight = (1 - p_t) ** self.gamma
+        
+        # Apply alpha weighting
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        focal_loss = alpha_t * focal_weight * bce_loss
+        
+        return focal_loss.mean()
 
 
 class MultiTaskLoss(nn.Module):
@@ -195,7 +228,7 @@ def create_datasets_and_loaders(data_dir, config):
     val_indices = file_indices[train_count:].tolist()
     np.random.seed(None)
     
-    print(f"\nFile-based split (prevents data leakage):")
+    print("\nFile-based split (prevents data leakage):")
     print(f"  Train: {train_count} files ({train_count/num_files*100:.1f}%)")
     print(f"  Val:   {val_count} files ({val_count/num_files*100:.1f}%)")
     
@@ -222,7 +255,7 @@ def create_datasets_and_loaders(data_dir, config):
         preload_into_ram=config.get('preload_into_ram', True)  # NEW: RAM preloading
     )
     
-    print(f"\nDataset summary:")
+    print("\nDataset summary:")
     print(f"  Train snippets: {len(train_dataset)}")
     print(f"  Val snippets:   {len(val_dataset)}")
     
@@ -287,7 +320,7 @@ def create_scheduler(optimizer, config, num_epochs):
             threshold=config.get('scheduler_threshold', 1e-4),
             threshold_mode='rel'
         )
-        print(f"Using ReduceLROnPlateau scheduler")
+        print("Using ReduceLROnPlateau scheduler")
     
     elif scheduler_type == 'cosine':
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
@@ -295,7 +328,7 @@ def create_scheduler(optimizer, config, num_epochs):
             T_max=num_epochs,
             eta_min=config.get('scheduler_min_lr', 1e-6)
         )
-        print(f"Using cosine annealing scheduler")
+        print("Using cosine annealing scheduler")
     
     else:
         print(f"Unknown scheduler type: {scheduler_type}")
@@ -473,11 +506,12 @@ def train(data_dir, run_folder, config):
         consistency_weight=config.get('consistency_weight', 0.5)
     )
     
-    print(f"\nLoss weights:")
+    print("\nLoss weights:")
     print(f"  Onset: {config.get('onset_weight', 4.0)}")
     print(f"  Offset: {config.get('offset_weight', 1.0)}")
     print(f"  Frame: {config.get('frame_weight', 1.0)}")
     print(f"  Consistency: {config.get('consistency_weight', 0.5)}")
+    print(f"  Positive class weight: {config.get('pos_weight', 10.0)}")
     
     optimizer = optim.Adam(
         model.parameters(),
@@ -551,7 +585,7 @@ def train(data_dir, run_folder, config):
         if val_loss['total_loss'] < best_val_loss:
             best_val_loss = val_loss['total_loss']
             torch.save(model.state_dict(), model_path)
-            print(f"✓ Best model saved")
+            print("✓ Best model saved")
         
         # Save checkpoint
         save_checkpoint(epoch, model, optimizer, scheduler, train_losses, val_losses,
@@ -561,7 +595,7 @@ def train(data_dir, run_folder, config):
         plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, curves_path)
         
         # Visualize predictions periodically
-        if (epoch + 1) % 50 == 0:
+        if (epoch + 1) % 52 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
         

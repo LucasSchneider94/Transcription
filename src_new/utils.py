@@ -58,26 +58,52 @@ def compute_metrics(predictions, targets, threshold=0.5):
 def visualize_predictions(model, dataloader, device, save_path):
     """Visualize model predictions vs ground truth."""
     model.eval()
-    spectrograms, piano_rolls = next(iter(dataloader))
-    spectrograms = spectrograms.to(device)
+    batch = next(iter(dataloader))
+    
+    spectrograms = batch['spectrogram'].to(device)
+    onset_gt = batch['onset'].cpu().numpy()
+    offset_gt = batch['offset'].cpu().numpy()
+    frame_gt = batch['frame'].cpu().numpy()
     
     with torch.no_grad():
-        predictions = model(spectrograms)
+        predictions = model(spectrograms.unsqueeze(1))
     
-    pred = predictions[0].cpu().numpy()
-    gt = piano_rolls[0].cpu().numpy()
+    # Get first sample in batch
+    onset_pred = torch.sigmoid(predictions['onset'][0]).cpu().numpy()
+    offset_pred = torch.sigmoid(predictions['offset'][0]).cpu().numpy()
+    frame_pred = torch.sigmoid(predictions['frame'][0]).cpu().numpy()
     
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    onset_gt = onset_gt[0]
+    offset_gt = offset_gt[0]
+    frame_gt = frame_gt[0]
     
-    axes[0].imshow(gt.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[0].set_title('Ground Truth')
-    axes[0].set_xlabel('Time Frames')
-    axes[0].set_ylabel('Keys + Pedals')
+    fig, axes = plt.subplots(3, 2, figsize=(15, 12))
     
-    axes[1].imshow(pred.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[1].set_title('Predictions')
-    axes[1].set_xlabel('Time Frames')
-    axes[1].set_ylabel('Keys + Pedals')
+    # Onset
+    axes[0, 0].imshow(onset_gt.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[0, 0].set_title('Onset Ground Truth')
+    axes[0, 0].set_ylabel('Piano Keys (88)')
+    
+    axes[0, 1].imshow(onset_pred.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[0, 1].set_title('Onset Predictions')
+    
+    # Offset
+    axes[1, 0].imshow(offset_gt.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[1, 0].set_title('Offset Ground Truth')
+    axes[1, 0].set_ylabel('Piano Keys (88)')
+    
+    axes[1, 1].imshow(offset_pred.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[1, 1].set_title('Offset Predictions')
+    
+    # Frame
+    axes[2, 0].imshow(frame_gt.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[2, 0].set_title('Frame Ground Truth')
+    axes[2, 0].set_ylabel('Piano Keys (88)')
+    axes[2, 0].set_xlabel('Time Frames')
+    
+    axes[2, 1].imshow(frame_pred.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+    axes[2, 1].set_title('Frame Predictions')
+    axes[2, 1].set_xlabel('Time Frames')
     
     plt.tight_layout()
     plt.savefig(save_path)

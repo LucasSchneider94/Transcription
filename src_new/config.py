@@ -19,7 +19,7 @@ CONFIG = {
     'snippet_duration': 3.0,
     'batch_size': 16,
     'learning_rate': 1e-4,
-    'num_epochs': 50,
+    'num_epochs': 200,
     'hidden_size': 256,
     'num_heads': 8,
     'num_layers': 4,
@@ -27,14 +27,15 @@ CONFIG = {
     'weight_decay': 1e-4,
     
     # Multi-task loss weights
-    'onset_weight': 4.0,                    # Higher weight for onsets (sparse but critical)
-    'offset_weight': 1.0,
-    'frame_weight': 1.0,
+    'onset_weight': 10.0,                   # Much higher weight for onsets (very sparse but critical)
+    'offset_weight': 3.0,                   # Higher weight for offsets (sparse)
+    'frame_weight': 1.0,                    # Baseline weight for frames
     'consistency_weight': 0.5,              # Temporal consistency loss weight
+    'pos_weight': 10.0,                     # Positive class weight to combat class imbalance (10-50 recommended)
     
     # Data augmentation settings
     'snippets_per_file': 50,
-    'data_fraction': 0.1,                   # Fraction of dataset to use (for quick experiments)
+    'data_fraction': 1,                   # Fraction of dataset to use (for quick experiments)
     
     # Model architecture
     'use_cnn_only': False,                  # If True, use CNN-only model (ablation study)
@@ -47,7 +48,6 @@ CONFIG = {
     
     # DataLoader optimization settings
     'num_workers': 12,
-    'pin_memory': False,
     'prefetch_factor': 2,
     'persistent_workers': True,
     'preload_into_ram': False,

@@ -93,8 +93,8 @@ def create_spectrogram_comparison(audio_path, midi_path=None, save_path='resolut
         
         plt.colorbar(img, ax=ax, format='%+2.0f dB')
     
-    plt.suptitle(f'Spectrogram Resolution Comparison\n'
-                f'Goal: Can you clearly see note onsets and distinguish pitches?',
+    plt.suptitle('Spectrogram Resolution Comparison\n'
+                'Goal: Can you clearly see note onsets and distinguish pitches?',
                 fontsize=14, fontweight='bold')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -149,11 +149,11 @@ def analyze_note_separation(audio_path, piano_roll_path=None):
         
         # Real-world interpretation
         if min_time_gap_ms < 20:
-            print(f"  ✓ Fast passages: Can resolve 32nd notes at 120 BPM")
+            print("  ✓ Fast passages: Can resolve 32nd notes at 120 BPM")
         elif min_time_gap_ms < 50:
-            print(f"  ⚠ Fast passages: Can resolve 16th notes at 120 BPM")
+            print("  ⚠ Fast passages: Can resolve 16th notes at 120 BPM")
         else:
-            print(f"  ✗ Fast passages: May miss rapid notes")
+            print("  ✗ Fast passages: May miss rapid notes")
     
     print("="*80)
 

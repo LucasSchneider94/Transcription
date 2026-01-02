@@ -8,8 +8,6 @@ from torch.utils.data import Dataset
 import numpy as np
 import os
 from tqdm import tqdm
-import pickle
-from pathlib import Path
 
 
 class PianoTranscriptionDataset(Dataset):

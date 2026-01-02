@@ -10,10 +10,9 @@ import matplotlib.pyplot as plt
 import os
 import pretty_midi
 import json
-from pathlib import Path
 
 from model import PianoTranscriptionModel, PianoTranscriptionModelLegacy
-from config import CONFIG, NUM_OUTPUTS, MIN_PITCH
+from config import CONFIG, NUM_OUTPUTS
 from data_preparation import build_binary_piano_roll_with_pedals
 from inference_config import INFERENCE_CONFIG
 
@@ -33,7 +32,7 @@ def preprocess_audio_to_spectrogram_inference(audio_path, n_mels, n_fft, hop_len
     Returns:
         np.ndarray: Mel-spectrogram of shape (n_mels, time_frames)
     """
-    print(f"Computing fresh spectrogram with:")
+    print("Computing fresh spectrogram with:")
     print(f"  n_mels: {n_mels}")
     print(f"  n_fft: {n_fft}")
     print(f"  hop_length: {hop_length}")
@@ -518,7 +517,7 @@ def main():
     
     # Run inference in chunks (like training) to avoid temporal degradation
     print(f"\n{'='*80}")
-    print(f"Running inference...")
+    print("Running inference...")
     print(f"{'='*80}")
     predictions = run_inference_chunked(
         model, 
@@ -532,7 +531,7 @@ def main():
     if piano_roll_snippet is not None:
         metrics = calculate_metrics(predictions, piano_roll_snippet)
         print(f"\n{'='*80}")
-        print(f"METRICS")
+        print("METRICS")
         print(f"{'='*80}")
         print(f"  Precision: {metrics['precision']:.4f}")
         print(f"  Recall:    {metrics['recall']:.4f}")
@@ -554,7 +553,7 @@ def main():
         plot_full_range=INFERENCE_CONFIG['plot_full_range']
     )
     
-    print(f"\n✓ Inference complete!")
+    print("\n✓ Inference complete!")
 
 
 if __name__ == "__main__":
