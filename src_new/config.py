@@ -8,7 +8,7 @@ CONFIG = {
     
     # Data paths
     'data_dir': './processed_data_17_18',
-    'split_year_folder': "2017",
+    'split_year_folder': "2018",
     
     # Onset/Offset detection parameters
     'onset_frames': 2,                      # Mark onset in N consecutive frames (helps with alignment)

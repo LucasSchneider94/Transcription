@@ -116,7 +116,16 @@ def run_inference_chunked(model, spectrogram, device, chunk_frames=300):
         
         # Run inference
         with torch.no_grad():
-            chunk_pred = model(chunk_tensor)[0].cpu().numpy()  # (chunk_frames, num_outputs)
+            output = model(chunk_tensor)
+            
+            # Handle different output formats
+            if isinstance(output, dict):
+                # New model with onset/offset/frame heads
+                # Use frame predictions as main output (most similar to old behavior)
+                chunk_pred = torch.sigmoid(output['frame'])[0].cpu().numpy()  # (chunk_frames, num_keys)
+            else:
+                # Legacy model with single output
+                chunk_pred = output[0].cpu().numpy()  # (chunk_frames, num_outputs)
         
         # Take only non-overlapping part (or trim padding)
         if start_idx + stride >= total_frames:
@@ -186,12 +195,13 @@ def load_model(model_path, device):
     else:
         print("Loading with PianoTranscriptionModel (new architecture)...")
         model = PianoTranscriptionModel(
-            n_mels=model_config.get('n_mels', 352),
-            hidden_size=model_config.get('hidden_size', 256),
+            input_features=model_config.get('n_mels', 352),
+            num_keys=model_config.get('num_keys', 88),
+            cnn_channels=[32, 64, 128],
+            transformer_dim=model_config.get('hidden_size', 256),
             num_heads=model_config.get('num_heads', 8),
-            num_layers=model_config.get('num_layers', 4),
-            num_outputs=NUM_OUTPUTS,
-            dropout=model_config.get('dropout', 0.2)
+            num_layers=model_config.get('num_layers', 6),
+            dropout=model_config.get('dropout', 0.1)
         ).to(device)
     
     model.load_state_dict(torch.load(model_path, map_location=device))
@@ -272,6 +282,16 @@ def calculate_metrics(predictions, ground_truth, threshold=0.5):
         dict: Metrics dictionary
     """
     pred_binary = (predictions > threshold).astype(np.float32)
+    
+    # Handle shape mismatch: if predictions have 88 keys but ground truth has 91 (88 keys + 3 pedals)
+    if pred_binary.shape[1] != ground_truth.shape[1]:
+        if pred_binary.shape[1] == 88 and ground_truth.shape[1] == 91:
+            # New model outputs only 88 keys, ground truth has 88 keys + 3 pedals
+            # Compare only the first 88 keys (ignore pedals)
+            ground_truth = ground_truth[:, :88]
+            print(f"  Note: Comparing only piano keys (88), ignoring pedals from ground truth")
+        else:
+            raise ValueError(f"Shape mismatch: predictions {pred_binary.shape} vs ground truth {ground_truth.shape}")
     
     tp = np.sum(pred_binary * ground_truth)
     fp = np.sum(pred_binary * (1 - ground_truth))
