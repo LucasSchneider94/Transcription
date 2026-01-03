@@ -56,33 +56,65 @@ def compute_metrics(predictions, targets, threshold=0.5):
 
 
 def visualize_predictions(model, dataloader, device, save_path):
-    """Visualize model predictions vs ground truth."""
+    """
+    Visualize model predictions vs ground truth.
+    Uses the file specified in inference_config.py for consistency.
+    """
+    from inference import visualize_comparison, run_inference, preprocess_audio_to_spectrogram, extract_time_range
+    from inference_config import INFERENCE_CONFIG
+    from config import CONFIG
+    from data_preparation import create_piano_roll_with_onsets_durations
+    import os
+    
     model.eval()
-    spectrograms, piano_rolls = next(iter(dataloader))
-    spectrograms = spectrograms.to(device)
     
-    with torch.no_grad():
-        predictions = model(spectrograms)
+    # Use the same file as inference_config
+    if not os.path.exists(INFERENCE_CONFIG['audio_path']):
+        print(f"Warning: Audio file not found: {INFERENCE_CONFIG['audio_path']}")
+        print("Skipping visualization")
+        return
     
-    pred = predictions[0].cpu().numpy()
-    gt = piano_rolls[0].cpu().numpy()
+    # Load and process audio
+    full_spectrogram = preprocess_audio_to_spectrogram(
+        INFERENCE_CONFIG['audio_path'],
+        CONFIG
+    )
     
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+    # Load ground truth if available
+    full_labels = None
+    if INFERENCE_CONFIG['midi_path'] is not None and os.path.exists(INFERENCE_CONFIG['midi_path']):
+        full_labels = create_piano_roll_with_onsets_durations(
+            INFERENCE_CONFIG['midi_path'],
+            fps=CONFIG['roll_fps'],
+            onset_frames=CONFIG.get('onset_frames', 2)
+        )
     
-    axes[0].imshow(gt.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[0].set_title('Ground Truth')
-    axes[0].set_xlabel('Time Frames')
-    axes[0].set_ylabel('Keys + Pedals')
+    # Extract the time range from inference_config
+    start_time = INFERENCE_CONFIG['start_time']
+    end_time = INFERENCE_CONFIG['end_time']
     
-    axes[1].imshow(pred.T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-    axes[1].set_title('Predictions')
-    axes[1].set_xlabel('Time Frames')
-    axes[1].set_ylabel('Keys + Pedals')
+    spectrogram_snippet, labels_snippet = extract_time_range(
+        full_spectrogram,
+        full_labels,
+        start_time,
+        end_time,
+        CONFIG['roll_fps'],
+        CONFIG['hop_length'],
+        CONFIG['sample_rate']
+    )
     
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close()
-    print(f"Visualization saved to {save_path}")
+    # Run inference
+    predictions = run_inference(model, spectrogram_snippet, device, CONFIG)
+    
+    # Visualize using the same function as inference.py
+    visualize_comparison(
+        labels_snippet,
+        predictions,
+        save_path,
+        start_time,
+        end_time,
+        CONFIG['roll_fps']
+    )
 
 
 def plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, save_path):
@@ -109,12 +141,13 @@ def plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, s
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
-    # Plot 1: Loss
+    # Plot 1: Loss (LOGARITHMIC Y-AXIS)
     axes[0, 0].plot(epochs, train_losses, 'b-', label='Train Loss', linewidth=2)
     axes[0, 0].plot(epochs, val_losses, 'r-', label='Val Loss', linewidth=2)
     axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
+    axes[0, 0].set_ylabel('Loss (log scale)')
     axes[0, 0].set_title('Training and Validation Loss')
+    axes[0, 0].set_yscale('log')  # Set logarithmic y-axis
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
     

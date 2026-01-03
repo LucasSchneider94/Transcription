@@ -8,7 +8,7 @@ CONFIG = {
     
     # Data paths
     'data_dir': './processed_data_17_18',
-    'split_year_folder': "2017",
+    'split_year_folder': "2018",
     
     # Onset/Duration parameters (NEW)
     'onset_frames': 2,                      # Mark onset in N consecutive frames (helps with alignment)
@@ -18,9 +18,9 @@ CONFIG = {
     
     # Training parameters
     'snippet_duration': 3.0,
-    'batch_size': 8,                        # REDUCED for faster testing
+    'batch_size': 32,                        # REDUCED for faster testing
     'learning_rate': 1e-4,
-    'num_epochs': 200,                       # REDUCED for quick test
+    'num_epochs': 500,                       # REDUCED for quick test
     'hidden_size': 256,
     'num_heads': 8,
     'num_layers': 4,
@@ -28,14 +28,15 @@ CONFIG = {
     'weight_decay': 1e-4,
     
     # Multi-task loss weights (UPDATED for onset + duration)
-    'onset_weight': 4.0,                    # Higher weight for onsets (sparse but critical)
-    'duration_weight': 2.0,                 # Duration prediction weight
-    'frame_weight': 1.0,                    # Frame consistency weight
+    'onset_weight': 10.0,                   # INCREASED: Onset detection is the hardest task
+    'onset_pos_weight': 100.0,              # Positive class weight for onset BCE (handles class imbalance)
+    'duration_weight': 1.0,                 # DECREASED: Duration is masked (only at onsets), easier task
+    'frame_weight': 0.1,                    # DECREASED: Frame is auxiliary, should not dominate
     'consistency_weight': 0.5,              # Temporal consistency loss weight
     
     # Data augmentation settings
-    'snippets_per_file': 20,                # REDUCED for faster testing
-    'data_fraction': 0.05,                  # REDUCED: Use 5% of dataset for quick test
+    'snippets_per_file': 50,                # REDUCED for faster testing
+    'data_fraction': 1,                  # REDUCED: Use 5% of dataset for quick test
     
     # Model architecture
     'use_cnn_only': False,                  # If True, use CNN-only model (ablation study)
@@ -43,14 +44,14 @@ CONFIG = {
     # Learning rate scheduler settings
     'use_lr_scheduler': True,
     'scheduler_type': 'cosine_warmup',
-    'warmup_epochs': 2,                     # REDUCED for quick test
+    'warmup_epochs': 5,                     # REDUCED for quick test
     'scheduler_min_lr': 1e-6,
     
     # DataLoader optimization settings
-    'num_workers': 0,                       # Set to 0 for debugging/testing
+    'num_workers': 12,                       # Set to 0 for debugging/testing
     'pin_memory': False,
     'prefetch_factor': 2,
-    'persistent_workers': False,            # Set to False when num_workers=0
+    'persistent_workers': True,            # Set to False when num_workers=0
     'preload_into_ram': False,
     
     # Training mode settings

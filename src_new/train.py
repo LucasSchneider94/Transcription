@@ -32,17 +32,21 @@ class OnsetDurationLoss(nn.Module):
     - 'bins': Classification with cross-entropy loss
     - 'log': Log-duration regression with MSE loss
     - 'linear': Linear duration regression with MSE loss
+    
+    Uses pos_weight for onset BCE to handle extreme class imbalance.
     """
     def __init__(self, onset_weight=4.0, duration_weight=2.0, frame_weight=1.0, 
-                 duration_mode='log'):
+                 duration_mode='log', onset_pos_weight=100.0):
         super(OnsetDurationLoss, self).__init__()
         self.onset_weight = onset_weight
         self.duration_weight = duration_weight
         self.frame_weight = frame_weight
         self.duration_mode = duration_mode
+        self.onset_pos_weight = onset_pos_weight
         
         # Loss functions
-        self.bce = nn.BCEWithLogitsLoss(reduction='mean')
+        # NOTE: pos_weight will be moved to device in forward pass
+        self.frame_bce = nn.BCEWithLogitsLoss(reduction='mean')
         self.ce = nn.CrossEntropyLoss(reduction='none')  # Use 'none' for masking
         self.mse = nn.MSELoss(reduction='none')  # Use 'none' for masking
     
@@ -63,8 +67,14 @@ class OnsetDurationLoss(nn.Module):
         Returns:
             Total weighted loss and individual losses
         """
-        # Onset loss (BCE)
-        onset_loss = self.bce(predictions['onset'], targets['onset'])
+        # Get device from predictions
+        device = predictions['onset'].device
+        
+        # Onset loss (BCE with pos_weight for class imbalance)
+        # Create pos_weight tensor on the correct device
+        pos_weight = torch.tensor([self.onset_pos_weight], device=device)
+        onset_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='mean')
+        onset_loss = onset_bce(predictions['onset'], targets['onset'])
         
         # Duration loss (masked - only compute where onsets occur)
         onset_mask = targets['onset'] > 0.5  # (batch, time, 88)
@@ -98,7 +108,7 @@ class OnsetDurationLoss(nn.Module):
                 duration_loss = torch.tensor(0.0, device=predictions['onset'].device)
         
         # Frame loss (BCE) - for consistency/auxiliary task
-        frame_loss = self.bce(predictions['frame'], targets['frame'])
+        frame_loss = self.frame_bce(predictions['frame'], targets['frame'])
         
         # Total loss
         total_loss = (self.onset_weight * onset_loss + 
@@ -309,61 +319,61 @@ def compute_frame_metrics(predictions, targets, threshold=0.5):
     }
 
 
-def train_epoch(model, dataloader, criterion, optimizer, device):
-    """Train for one epoch."""
-    model.train()
-    total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
-    total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
+def compute_onset_metrics(pred_onset, target_onset, tolerance_frames=5, threshold=0.5):
+    """
+    Compute note-level onset detection metrics with temporal tolerance.
+    An onset is correctly detected if it's within ±tolerance_frames of a ground truth onset
+    at the correct pitch.
     
-    pbar = tqdm(dataloader, desc="Training")
-    for batch_idx, batch in enumerate(pbar):
-        # Move data to device
-        spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
-        onset = batch['onset'].to(device)
-        duration = batch['duration'].to(device)
-        frame = batch['frame'].to(device)
-        
-        # Forward pass
-        optimizer.zero_grad()
-        predictions = model(spectrogram)
-        
-        # Compute loss
-        targets = {'onset': onset, 'duration': duration, 'frame': frame}
-        loss, loss_dict = criterion(predictions, targets)
-        
-        # Backward pass
-        loss.backward()
-        optimizer.step()
-        
-        # Compute frame metrics
-        with torch.no_grad():
-            metrics = compute_frame_metrics(predictions['frame'], frame)
-        
-        # Accumulate losses and metrics
-        for key in total_losses:
-            total_losses[key] += loss_dict[key]
-        for key in total_metrics:
-            total_metrics[key] += metrics[key]
-        
-        # Update progress bar
-        pbar.set_postfix({
-            'loss': f"{loss_dict['total_loss']:.4f}",
-            'f1': f"{metrics['f1']:.3f}"
-        })
+    Args:
+        pred_onset: (batch, time, 88) - onset predictions (logits or probabilities)
+        target_onset: (batch, time, 88) - ground truth onsets (binary)
+        tolerance_frames: temporal tolerance window (±frames), default 5 = ±50ms at 100fps
+        threshold: prediction threshold for binarization
     
-    # Average losses and metrics
-    num_batches = len(dataloader)
-    for key in total_losses:
-        total_losses[key] /= num_batches
-    for key in total_metrics:
-        total_metrics[key] /= num_batches
+    Returns:
+        dict with onset_precision, onset_recall, onset_f1, and counts (tp, fp, fn)
+    """
+    # Apply sigmoid if needed
+    if pred_onset.min() < 0 or pred_onset.max() > 1:
+        pred_onset = torch.sigmoid(pred_onset)
     
-    return total_losses, total_metrics
-
-
-def validate(model, dataloader, criterion, device):
-    """Validate the model."""
-    model.eval()
+    # Binarize predictions
+    pred_binary = (pred_onset > threshold).float()
+    
+    # Initialize counters
+    tp = 0  # True positives
+    fp = 0  # False positives
+    fn = 0  # False negatives
+    
+    batch_size = pred_onset.shape[0]
+    
+    # Process each sample in batch
+    for batch_idx in range(batch_size):
+        # Process each pitch separately
+        for pitch_idx in range(88):
+            # Find ground truth onset frames for this pitch
+            gt_frames = torch.where(target_onset[batch_idx, :, pitch_idx] > 0.5)[0]
+            
+            # Find predicted onset frames for this pitch
+            pred_frames = torch.where(pred_binary[batch_idx, :, pitch_idx] > 0.5)[0]
+            
+            if len(gt_frames) == 0 and len(pred_frames) == 0:
+                continue  # No onsets for this pitch, skip
+            
+            # Convert to numpy for easier processing
+            gt_frames_np = gt_frames.cpu().numpy()
+            pred_frames_np = pred_frames.cpu().numpy()
+            
+            # Match predictions to ground truth with tolerance
+            matched_gt = set()
+            matched_pred = set()
+            
+            for pred_frame in pred_frames_np:
+                # Check if this prediction is within tolerance of any GT
+                best_match = None
+                best_distance = tolerance_frames + 1
+                
     total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
     total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
     
@@ -442,11 +452,13 @@ def train(data_dir, run_folder, config):
         onset_weight=config.get('onset_weight', 4.0),
         duration_weight=config.get('duration_weight', 2.0),
         frame_weight=config.get('frame_weight', 1.0),
-        duration_mode=config.get('duration_mode', 'log')
+        duration_mode=config.get('duration_mode', 'log'),
+        onset_pos_weight=config.get('onset_pos_weight', 100.0)  # ADD: use from config
     )
     
     print(f"\nLoss weights:")
     print(f"  Onset: {config.get('onset_weight', 4.0)}")
+    print(f"  Onset pos_weight: {config.get('onset_pos_weight', 100.0)}")  # ADD: print it
     print(f"  Duration: {config.get('duration_weight', 2.0)}")
     print(f"  Frame: {config.get('frame_weight', 1.0)}")
     print(f"  Duration mode: {config.get('duration_mode', 'log')}")
@@ -533,7 +545,7 @@ def train(data_dir, run_folder, config):
         plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, curves_path)
         
         # Visualize predictions periodically
-        if (epoch + 1) % 50 == 0:
+        if (epoch + 1) % 10 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
         

@@ -188,8 +188,8 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
     duration = end_time - start_time
     
     if ground_truth is not None:
-        # Plot ground truth and predictions side by side
-        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
+        # Plot ground truth and predictions side by side - 2x2 grid
+        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
         
         # Ground truth
         # Panel 1: Onset + Duration
@@ -205,24 +205,19 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
         
         im1 = axes[0, 0].imshow(onset_duration_combined.T, aspect='auto', origin='lower', 
                                 cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
-        axes[0, 0].set_title(f'Ground Truth: Onsets + Duration', fontsize=12, fontweight='bold')
-        axes[0, 0].set_ylabel('Piano Keys (88)', fontsize=10)
+        axes[0, 0].set_title(f'Ground Truth: Onsets + Duration', fontsize=14, fontweight='bold')
+        axes[0, 0].set_ylabel('Piano Keys (88)', fontsize=11)
         cbar1 = plt.colorbar(im1, ax=axes[0, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
         tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
-        cbar1.ax.set_yticklabels(tick_labels, fontsize=7)
+        cbar1.ax.set_yticklabels(tick_labels, fontsize=8)
         
         # Panel 2: Frame
         axes[0, 1].imshow(ground_truth['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        axes[0, 1].set_title(f'Ground Truth: Frame', fontsize=12, fontweight='bold')
-        axes[0, 1].set_ylabel('Piano Keys (88)', fontsize=10)
-        
-        # Panel 3: Pedal
-        axes[0, 2].imshow(ground_truth['pedal'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        axes[0, 2].set_title(f'Ground Truth: Pedal', fontsize=12, fontweight='bold')
-        axes[0, 2].set_ylabel('Pedal', fontsize=10)
+        axes[0, 1].set_title(f'Ground Truth: Frame (Active Notes)', fontsize=14, fontweight='bold')
+        axes[0, 1].set_ylabel('Piano Keys (88)', fontsize=11)
         
         # Predictions
-        # Panel 4: Onset + Duration
+        # Panel 3: Onset + Duration
         pred_onset = predictions['onset']
         pred_duration = predictions['duration']
         pred_duration_binned = np.zeros_like(pred_duration)
@@ -235,55 +230,21 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
         
         im2 = axes[1, 0].imshow(pred_onset_duration_combined.T, aspect='auto', origin='lower', 
                                 cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
-        axes[1, 0].set_title(f'Predicted: Onsets + Duration', fontsize=12, fontweight='bold')
-        axes[1, 0].set_ylabel('Piano Keys (88)', fontsize=10)
-        axes[1, 0].set_xlabel('Time Frames', fontsize=10)
+        axes[1, 0].set_title(f'Predicted: Onsets + Duration', fontsize=14, fontweight='bold')
+        axes[1, 0].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[1, 0].set_xlabel('Time Frames', fontsize=11)
         cbar2 = plt.colorbar(im2, ax=axes[1, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
-        cbar2.ax.set_yticklabels(tick_labels, fontsize=7)
+        cbar2.ax.set_yticklabels(tick_labels, fontsize=8)
         
-        # Panel 5: Frame
+        # Panel 4: Frame
         axes[1, 1].imshow(predictions['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        axes[1, 1].set_title(f'Predicted: Frame', fontsize=12, fontweight='bold')
-        axes[1, 1].set_ylabel('Piano Keys (88)', fontsize=10)
-        axes[1, 1].set_xlabel('Time Frames', fontsize=10)
-        
-        # Panel 6: Stats
-        axes[1, 2].axis('off')
-        stats_text = f"Time Range: {start_time:.1f}s - {end_time:.1f}s\n\n"
-        stats_text += f"Ground Truth:\n"
-        stats_text += f"  Total onsets: {np.sum(gt_onset):.0f}\n"
-        if np.sum(gt_onset) > 0:
-            gt_durations = gt_duration[gt_onset == 1]
-            stats_text += f"  Duration range: {gt_durations.min():.3f}s - {gt_durations.max():.3f}s\n"
-            stats_text += f"  Mean duration: {gt_durations.mean():.3f}s\n\n"
-        
-        stats_text += f"Predictions:\n"
-        pred_onset_binary = (pred_onset > 0.5).astype(float)
-        stats_text += f"  Total onsets: {np.sum(pred_onset_binary):.0f}\n"
-        if np.sum(pred_onset_binary) > 0:
-            pred_durations = pred_duration[pred_onset_binary == 1]
-            stats_text += f"  Duration range: {pred_durations.min():.3f}s - {pred_durations.max():.3f}s\n"
-            stats_text += f"  Mean duration: {pred_durations.mean():.3f}s\n\n"
-        
-        # Metrics
-        onset_tp = np.sum(pred_onset_binary * gt_onset)
-        onset_fp = np.sum(pred_onset_binary * (1 - gt_onset))
-        onset_fn = np.sum((1 - pred_onset_binary) * gt_onset)
-        onset_precision = onset_tp / (onset_tp + onset_fp) if (onset_tp + onset_fp) > 0 else 0
-        onset_recall = onset_tp / (onset_tp + onset_fn) if (onset_tp + onset_fn) > 0 else 0
-        onset_f1 = 2 * onset_precision * onset_recall / (onset_precision + onset_recall) if (onset_precision + onset_recall) > 0 else 0
-        
-        stats_text += f"Onset Metrics:\n"
-        stats_text += f"  Precision: {onset_precision:.3f}\n"
-        stats_text += f"  Recall: {onset_recall:.3f}\n"
-        stats_text += f"  F1: {onset_f1:.3f}\n"
-        
-        axes[1, 2].text(0.1, 0.5, stats_text, fontsize=10, verticalalignment='center', 
-                       family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        axes[1, 1].set_title(f'Predicted: Frame (Active Notes)', fontsize=14, fontweight='bold')
+        axes[1, 1].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[1, 1].set_xlabel('Time Frames', fontsize=11)
         
     else:
         # Plot only predictions
-        fig, axes = plt.subplots(1, 3, figsize=(20, 5))
+        fig, axes = plt.subplots(1, 2, figsize=(18, 5))
         
         # Panel 1: Onset + Duration
         pred_onset = predictions['onset']
@@ -298,32 +259,18 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
         
         im = axes[0].imshow(pred_onset_duration_combined.T, aspect='auto', origin='lower', 
                            cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
-        axes[0].set_title(f'Predicted: Onsets + Duration', fontsize=12, fontweight='bold')
-        axes[0].set_ylabel('Piano Keys (88)', fontsize=10)
-        axes[0].set_xlabel('Time Frames', fontsize=10)
+        axes[0].set_title(f'Predicted: Onsets + Duration', fontsize=14, fontweight='bold')
+        axes[0].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[0].set_xlabel('Time Frames', fontsize=11)
         cbar = plt.colorbar(im, ax=axes[0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
         tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
-        cbar.ax.set_yticklabels(tick_labels, fontsize=7)
+        cbar.ax.set_yticklabels(tick_labels, fontsize=8)
         
         # Panel 2: Frame
         axes[1].imshow(predictions['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
-        axes[1].set_title(f'Predicted: Frame', fontsize=12, fontweight='bold')
-        axes[1].set_ylabel('Piano Keys (88)', fontsize=10)
-        axes[1].set_xlabel('Time Frames', fontsize=10)
-        
-        # Panel 3: Stats
-        axes[2].axis('off')
-        pred_onset_binary = (pred_onset > 0.5).astype(float)
-        stats_text = f"Time Range: {start_time:.1f}s - {end_time:.1f}s\n\n"
-        stats_text += f"Predictions:\n"
-        stats_text += f"  Total onsets: {np.sum(pred_onset_binary):.0f}\n"
-        if np.sum(pred_onset_binary) > 0:
-            pred_durations = pred_duration[pred_onset_binary == 1]
-            stats_text += f"  Duration range: {pred_durations.min():.3f}s - {pred_durations.max():.3f}s\n"
-            stats_text += f"  Mean duration: {pred_durations.mean():.3f}s\n"
-        
-        axes[2].text(0.1, 0.5, stats_text, fontsize=10, verticalalignment='center',
-                    family='monospace', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        axes[1].set_title(f'Predicted: Frame (Active Notes)', fontsize=14, fontweight='bold')
+        axes[1].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[1].set_xlabel('Time Frames', fontsize=11)
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
