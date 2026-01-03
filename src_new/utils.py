@@ -119,25 +119,25 @@ def visualize_predictions(model, dataloader, device, save_path):
 
 def plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, save_path):
     """
-    Plot training and validation losses and metrics.
+    Plot training and validation losses and onset metrics.
     
     Args:
         train_losses: List of training losses per epoch
         val_losses: List of validation losses per epoch
-        train_metrics: List of training metrics dicts per epoch
-        val_metrics: List of validation metrics dicts per epoch
+        train_metrics: List of training metrics dicts per epoch (onset only)
+        val_metrics: List of validation metrics dicts per epoch (onset only)
         save_path: Path to save the plot
     """
     epochs = range(1, len(train_losses) + 1)
     
-    # Extract metrics from dicts
-    train_precision = [m['precision'] for m in train_metrics]
-    train_recall = [m['recall'] for m in train_metrics]
-    train_f1 = [m['f1'] for m in train_metrics]
+    # Extract onset metrics from dicts
+    train_precision = [m['onset_precision'] for m in train_metrics]
+    train_recall = [m['onset_recall'] for m in train_metrics]
+    train_f1 = [m['onset_f1'] for m in train_metrics]
     
-    val_precision = [m['precision'] for m in val_metrics]
-    val_recall = [m['recall'] for m in val_metrics]
-    val_f1 = [m['f1'] for m in val_metrics]
+    val_precision = [m['onset_precision'] for m in val_metrics]
+    val_recall = [m['onset_recall'] for m in val_metrics]
+    val_f1 = [m['onset_f1'] for m in val_metrics]
     
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     
@@ -151,32 +151,32 @@ def plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, s
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
     
-    # Plot 2: Precision
+    # Plot 2: Onset Precision
     axes[0, 1].plot(epochs, train_precision, 'b-', label='Train Precision', linewidth=2)
     axes[0, 1].plot(epochs, val_precision, 'r-', label='Val Precision', linewidth=2)
     axes[0, 1].set_xlabel('Epoch')
     axes[0, 1].set_ylabel('Precision')
-    axes[0, 1].set_title('Frame-Level Precision')
+    axes[0, 1].set_title('Onset Detection Precision')
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     axes[0, 1].set_ylim([0, 1])
     
-    # Plot 3: Recall
+    # Plot 3: Onset Recall
     axes[1, 0].plot(epochs, train_recall, 'b-', label='Train Recall', linewidth=2)
     axes[1, 0].plot(epochs, val_recall, 'r-', label='Val Recall', linewidth=2)
     axes[1, 0].set_xlabel('Epoch')
     axes[1, 0].set_ylabel('Recall')
-    axes[1, 0].set_title('Frame-Level Recall')
+    axes[1, 0].set_title('Onset Detection Recall')
     axes[1, 0].legend()
     axes[1, 0].grid(True, alpha=0.3)
     axes[1, 0].set_ylim([0, 1])
     
-    # Plot 4: F1 Score
+    # Plot 4: Onset F1 Score
     axes[1, 1].plot(epochs, train_f1, 'b-', label='Train F1', linewidth=2)
     axes[1, 1].plot(epochs, val_f1, 'r-', label='Val F1', linewidth=2)
     axes[1, 1].set_xlabel('Epoch')
     axes[1, 1].set_ylabel('F1 Score')
-    axes[1, 1].set_title('Frame-Level F1 Score')
+    axes[1, 1].set_title('Onset Detection F1 Score')
     axes[1, 1].legend()
     axes[1, 1].grid(True, alpha=0.3)
     axes[1, 1].set_ylim([0, 1])

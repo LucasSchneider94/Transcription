@@ -9,6 +9,7 @@ CONFIG = {
     # Data paths
     'data_dir': './processed_data_17_18',
     'split_year_folder': "2018",
+    'maestro_json': './maestro-v3.0.0.json',  # Path to MAESTRO metadata for proper train/val/test split
     
     # Onset/Duration parameters (NEW)
     'onset_frames': 2,                      # Mark onset in N consecutive frames (helps with alignment)
@@ -29,14 +30,20 @@ CONFIG = {
     
     # Multi-task loss weights (UPDATED for onset + duration)
     'onset_weight': 10.0,                   # INCREASED: Onset detection is the hardest task
-    'onset_pos_weight': 100.0,              # Positive class weight for onset BCE (handles class imbalance)
     'duration_weight': 1.0,                 # DECREASED: Duration is masked (only at onsets), easier task
     'frame_weight': 0.1,                    # DECREASED: Frame is auxiliary, should not dominate
     'consistency_weight': 0.5,              # Temporal consistency loss weight
     
+    # Focal Loss parameters (for handling extreme class imbalance)
+    'use_focal_loss': True,                 # Use Focal Loss instead of BCE
+    'onset_focal_alpha': 0.90,              # INCREASED: Alpha for onset (need more focus on rare positives)
+    'onset_focal_gamma': 2.0,               # Gamma for onset (2.0 = standard)
+    'frame_focal_alpha': 0.25,              # Alpha for frame (lower since frames are less rare)
+    'frame_focal_gamma': 2.0,               # Gamma for frame
+    
     # Data augmentation settings
     'snippets_per_file': 50,                # REDUCED for faster testing
-    'data_fraction': 1,                  # REDUCED: Use 5% of dataset for quick test
+    'data_fraction': 0.15,                     # REDUCED: Use 5% of dataset for quick test
     
     # Model architecture
     'use_cnn_only': False,                  # If True, use CNN-only model (ablation study)

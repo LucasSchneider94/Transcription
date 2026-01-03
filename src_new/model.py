@@ -213,6 +213,12 @@ class PianoTranscriptionModel(nn.Module):
         # Optional: frame head for consistency loss (predicting active notes)
         self.frame_head = nn.Linear(transformer_dim, num_keys)
         
+        # Initialize onset head bias to encourage onset detection from the start
+        # Without this, model predicts ~0 everywhere initially due to extreme sparsity (0.23% positive)
+        # Initialize bias such that sigmoid(bias) ≈ 0.01 (i.e., bias ≈ -4.6)
+        # This gives the model a "head start" on detecting onsets
+        nn.init.constant_(self.onset_head.bias, -4.6)  # sigmoid(-4.6) ≈ 0.01
+        
     def forward(self, x):
         """
         Args:

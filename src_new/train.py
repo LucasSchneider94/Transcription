@@ -5,6 +5,7 @@ Supports onset + duration prediction with multiple modes (bins/log/linear).
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
@@ -13,6 +14,9 @@ import json
 from tqdm import tqdm
 
 from config import CONFIG, NUM_OUTPUTS
+# For overfitting test, uncomment the line below and comment out the line above:
+#from config_overfit import CONFIG_OVERFIT as CONFIG, NUM_OUTPUTS
+
 from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly
 from dataset import PianoTranscriptionDataset, duration_to_log_duration, log_duration_to_duration
 from utils import (
@@ -25,6 +29,73 @@ from utils import (
 )
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance in binary classification.
+    
+    FL = -α * (1-p_t)^γ * log(p_t)
+    
+    where:
+        p_t = p if y=1, else (1-p)
+        α = balancing factor for positive/negative classes
+        γ = focusing parameter (higher = more focus on hard examples)
+    
+    Reference: "Focal Loss for Dense Object Detection" (Lin et al., 2017)
+    """
+    def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
+        """
+        Args:
+            alpha: Balancing factor for positive class (0 to 1)
+                   - Use higher α (0.75-0.9) when positives are very rare
+                   - Use lower α (0.25) when positives are common
+            gamma: Focusing parameter (typically 2.0)
+                   - γ=0: equivalent to standard BCE
+                   - γ=2: balanced (recommended)
+                   - γ=5: aggressive focusing on hard examples
+            reduction: 'mean', 'sum', or 'none'
+        """
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+    
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: (N, ...) raw logits (before sigmoid)
+            targets: (N, ...) binary labels (0 or 1)
+        
+        Returns:
+            Focal loss value
+        """
+        # Get probabilities
+        p = torch.sigmoid(inputs)
+        
+        # Calculate standard BCE loss (without reduction)
+        ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        
+        # Calculate p_t: probability of correct class
+        p_t = p * targets + (1 - p) * (1 - targets)
+        
+        # Calculate focal weight: (1 - p_t)^gamma
+        # This down-weights easy examples (high p_t) and focuses on hard examples (low p_t)
+        focal_weight = (1 - p_t) ** self.gamma
+        
+        # Apply alpha balancing
+        # alpha for positive class, (1-alpha) for negative class
+        alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
+        
+        # Combine everything
+        loss = alpha_t * focal_weight * ce_loss
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+
+
 class OnsetDurationLoss(nn.Module):
     """
     Multi-task loss for onset, duration, and frame prediction.
@@ -33,20 +104,43 @@ class OnsetDurationLoss(nn.Module):
     - 'log': Log-duration regression with MSE loss
     - 'linear': Linear duration regression with MSE loss
     
-    Uses pos_weight for onset BCE to handle extreme class imbalance.
+    Uses Focal Loss for onset and frame to handle extreme class imbalance.
     """
     def __init__(self, onset_weight=4.0, duration_weight=2.0, frame_weight=1.0, 
-                 duration_mode='log', onset_pos_weight=100.0):
+                 duration_mode='log', 
+                 use_focal_loss=True,
+                 onset_focal_alpha=0.75, onset_focal_gamma=2.0,
+                 frame_focal_alpha=0.25, frame_focal_gamma=2.0):
         super(OnsetDurationLoss, self).__init__()
         self.onset_weight = onset_weight
         self.duration_weight = duration_weight
         self.frame_weight = frame_weight
         self.duration_mode = duration_mode
-        self.onset_pos_weight = onset_pos_weight
+        self.use_focal_loss = use_focal_loss
         
         # Loss functions
-        # NOTE: pos_weight will be moved to device in forward pass
-        self.frame_bce = nn.BCEWithLogitsLoss(reduction='mean')
+        if use_focal_loss:
+            # Focal Loss for onset (extreme imbalance ~0.23% positive)
+            self.onset_loss_fn = FocalLoss(
+                alpha=onset_focal_alpha,  # High alpha for very rare positives
+                gamma=onset_focal_gamma,
+                reduction='mean'
+            )
+            # Focal Loss for frame (moderate imbalance ~5% positive)
+            self.frame_loss_fn = FocalLoss(
+                alpha=frame_focal_alpha,  # Lower alpha for less rare positives
+                gamma=frame_focal_gamma,
+                reduction='mean'
+            )
+            print(f"Using Focal Loss:")
+            print(f"  Onset: α={onset_focal_alpha}, γ={onset_focal_gamma}")
+            print(f"  Frame: α={frame_focal_alpha}, γ={frame_focal_gamma}")
+        else:
+            # Standard BCE loss
+            self.onset_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
+            self.frame_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
+            print(f"Using standard BCE loss (no focal loss)")
+        
         self.ce = nn.CrossEntropyLoss(reduction='none')  # Use 'none' for masking
         self.mse = nn.MSELoss(reduction='none')  # Use 'none' for masking
     
@@ -67,14 +161,8 @@ class OnsetDurationLoss(nn.Module):
         Returns:
             Total weighted loss and individual losses
         """
-        # Get device from predictions
-        device = predictions['onset'].device
-        
-        # Onset loss (BCE with pos_weight for class imbalance)
-        # Create pos_weight tensor on the correct device
-        pos_weight = torch.tensor([self.onset_pos_weight], device=device)
-        onset_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='mean')
-        onset_loss = onset_bce(predictions['onset'], targets['onset'])
+        # Onset loss (Focal Loss or BCE)
+        onset_loss = self.onset_loss_fn(predictions['onset'], targets['onset'])
         
         # Duration loss (masked - only compute where onsets occur)
         onset_mask = targets['onset'] > 0.5  # (batch, time, 88)
@@ -107,8 +195,8 @@ class OnsetDurationLoss(nn.Module):
             else:
                 duration_loss = torch.tensor(0.0, device=predictions['onset'].device)
         
-        # Frame loss (BCE) - for consistency/auxiliary task
-        frame_loss = self.frame_bce(predictions['frame'], targets['frame'])
+        # Frame loss (Focal Loss or BCE)
+        frame_loss = self.frame_loss_fn(predictions['frame'], targets['frame'])
         
         # Total loss
         total_loss = (self.onset_weight * onset_loss + 
@@ -143,38 +231,95 @@ def save_config_to_run_folder(config, run_folder):
 
 
 def create_datasets_and_loaders(data_dir, config):
-    """Create train and validation datasets and dataloaders."""
-    # Get all files
+    """Create train and validation datasets and dataloaders using MAESTRO's official split."""
+    
+    # Load MAESTRO metadata
+    maestro_json_path = config.get('maestro_json', './maestro-v3.0.0.json')
+    if not os.path.exists(maestro_json_path):
+        raise FileNotFoundError(f"MAESTRO JSON not found at: {maestro_json_path}")
+    
+    with open(maestro_json_path, 'r') as f:
+        maestro_data = json.load(f)
+    
+    print(f"Loaded MAESTRO metadata from: {maestro_json_path}")
+    
+    # Get all processed files
     all_files = sorted([f for f in os.listdir(data_dir) 
                        if f.endswith("_piano_roll_with_pedals.npz")])
     num_files = len(all_files)
-    print(f"Total files found: {num_files}")
+    print(f"Total processed files found: {num_files}")
+    
+    # Build mapping from audio filename base to split
+    # MAESTRO filenames are like: "2018/MIDI-Unprocessed_Chamber3_MID--AUDIO_10_R3_2018_wav--1.wav"
+    # Our processed files are like: "MIDI-Unprocessed_Chamber3_MID--AUDIO_10_R3_2018_wav--1_piano_roll_with_pedals.npz"
+    audio_to_split = {}
+    for idx in maestro_data['audio_filename']:
+        audio_path = maestro_data['audio_filename'][idx]
+        split = maestro_data['split'][idx]
+        # Extract base filename without extension and directory
+        base_name = os.path.splitext(os.path.basename(audio_path))[0]
+        audio_to_split[base_name] = split
+    
+    print(f"Loaded {len(audio_to_split)} entries from MAESTRO metadata")
+    
+    # Classify files by split
+    train_files = []
+    val_files = []
+    test_files = []
+    unmatched_files = []
+    
+    for file in all_files:
+        # Extract base name from processed filename
+        # Remove "_piano_roll_with_pedals.npz" suffix
+        base_name = file.replace("_piano_roll_with_pedals.npz", "")
+        
+        if base_name in audio_to_split:
+            split = audio_to_split[base_name]
+            if split == 'train':
+                train_files.append(file)
+            elif split == 'validation':
+                val_files.append(file)
+            elif split == 'test':
+                test_files.append(file)
+            else:
+                raise ValueError(f"Unknown split '{split}' for file: {file}")
+        else:
+            unmatched_files.append(file)
+    
+    # Fail early if we have unmatched files (as requested)
+    if unmatched_files:
+        raise ValueError(
+            f"Found {len(unmatched_files)} files not in MAESTRO metadata. "
+            f"First few: {unmatched_files[:5]}\n"
+            f"This indicates a mismatch between processed files and MAESTRO dataset."
+        )
+    
+    print(f"\nMAESTRO official split:")
+    print(f"  Train:      {len(train_files)} files")
+    print(f"  Validation: {len(val_files)} files")
+    print(f"  Test:       {len(test_files)} files")
     
     # Apply data fraction if specified
     data_fraction = config.get('data_fraction', 1.0)
     if data_fraction < 1.0:
-        num_files_to_use = max(1, int(num_files * data_fraction))
-        print(f"Using {data_fraction*100:.1f}% of data ({num_files_to_use}/{num_files} files)")
+        print(f"\nApplying data fraction: {data_fraction*100:.1f}%")
+        train_keep = max(1, int(len(train_files) * data_fraction))
+        val_keep = max(1, int(len(val_files) * data_fraction))
+        
         np.random.seed(42)
-        selected_indices = np.random.permutation(num_files)[:num_files_to_use]
-        selected_indices = sorted(selected_indices)
-        all_files = [all_files[i] for i in selected_indices]
-        num_files = len(all_files)
+        train_files = sorted(np.random.choice(train_files, train_keep, replace=False).tolist())
+        val_files = sorted(np.random.choice(val_files, val_keep, replace=False).tolist())
         np.random.seed(None)
+        
+        print(f"  Using Train:      {len(train_files)} files")
+        print(f"  Using Validation: {len(val_files)} files")
     
-    # Split files into train/val (80/20)
-    train_count = int(0.8 * num_files)
-    val_count = num_files - train_count
+    # Create file lists with full paths
+    all_files_dict = {f: os.path.join(data_dir, f) for f in all_files}
     
-    np.random.seed(42)
-    file_indices = np.random.permutation(num_files)
-    train_indices = file_indices[:train_count].tolist()
-    val_indices = file_indices[train_count:].tolist()
-    np.random.seed(None)
-    
-    print(f"\nFile-based split (prevents data leakage):")
-    print(f"  Train: {train_count} files ({train_count/num_files*100:.1f}%)")
-    print(f"  Val:   {val_count} files ({val_count/num_files*100:.1f}%)")
+    # Create index mappings for dataset
+    train_indices = [all_files.index(f) for f in train_files]
+    val_indices = [all_files.index(f) for f in val_files]
     
     # Create datasets with duration_mode from config
     train_dataset = PianoTranscriptionDataset(
@@ -186,7 +331,7 @@ def create_datasets_and_loaders(data_dir, config):
         seed=42,
         fixed_snippets=config.get('fixed_snippets', False),
         preload_into_ram=config.get('preload_into_ram', True),
-        duration_mode=config.get('duration_mode', 'log')  # NEW: pass duration mode
+        duration_mode=config.get('duration_mode', 'log')
     )
     
     val_dataset = PianoTranscriptionDataset(
@@ -198,7 +343,7 @@ def create_datasets_and_loaders(data_dir, config):
         seed=42,
         fixed_snippets=config.get('fixed_snippets', False),
         preload_into_ram=config.get('preload_into_ram', True),
-        duration_mode=config.get('duration_mode', 'log')  # NEW: pass duration mode
+        duration_mode=config.get('duration_mode', 'log')
     )
     
     print(f"\nDataset summary:")
@@ -210,7 +355,7 @@ def create_datasets_and_loaders(data_dir, config):
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],
-        shuffle=config.get('shuffle_train', True),  # Use config setting
+        shuffle=config.get('shuffle_train', True),
         num_workers=config.get('num_workers', 0),
         pin_memory=config.get('pin_memory', False),
         prefetch_factor=config.get('prefetch_factor', 2) if config.get('num_workers', 0) > 0 else None,
@@ -374,8 +519,96 @@ def compute_onset_metrics(pred_onset, target_onset, tolerance_frames=5, threshol
                 best_match = None
                 best_distance = tolerance_frames + 1
                 
+                for gt_frame in gt_frames_np:
+                    distance = abs(int(pred_frame) - int(gt_frame))
+                    if distance <= tolerance_frames and distance < best_distance:
+                        if gt_frame not in matched_gt:
+                            best_match = gt_frame
+                            best_distance = distance
+                
+                if best_match is not None:
+                    matched_gt.add(best_match)
+                    matched_pred.add(pred_frame)
+                    tp += 1
+            
+            # Count unmatched predictions as false positives
+            fp += len(pred_frames_np) - len(matched_pred)
+            
+            # Count unmatched ground truth as false negatives
+            fn += len(gt_frames_np) - len(matched_gt)
+    
+    # Compute metrics
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    
+    return {
+        'onset_precision': precision,
+        'onset_recall': recall,
+        'onset_f1': f1,
+        'onset_tp': tp,
+        'onset_fp': fp,
+        'onset_fn': fn
+    }
+
+
+def train_epoch(model, dataloader, criterion, optimizer, device):
+    """Train for one epoch."""
+    model.train()
     total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
-    total_metrics = {'precision': 0, 'recall': 0, 'f1': 0}
+    total_onset_metrics = {'onset_precision': 0, 'onset_recall': 0, 'onset_f1': 0}
+    
+    pbar = tqdm(dataloader, desc="Training")
+    for batch_idx, batch in enumerate(pbar):
+        # Move data to device
+        spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
+        onset = batch['onset'].to(device)
+        duration = batch['duration'].to(device)
+        frame = batch['frame'].to(device)
+        
+        # Forward pass
+        optimizer.zero_grad()
+        predictions = model(spectrogram)
+        
+        # Compute loss
+        targets = {'onset': onset, 'duration': duration, 'frame': frame}
+        loss, loss_dict = criterion(predictions, targets)
+        
+        # Backward pass
+        loss.backward()
+        optimizer.step()
+        
+        # Compute onset metrics only
+        with torch.no_grad():
+            onset_metrics = compute_onset_metrics(predictions['onset'], onset)
+        
+        # Accumulate losses and metrics
+        for key in total_losses:
+            total_losses[key] += loss_dict[key]
+        for key in total_onset_metrics:
+            total_onset_metrics[key] += onset_metrics[key]
+        
+        # Update progress bar
+        pbar.set_postfix({
+            'loss': f"{loss_dict['total_loss']:.4f}",
+            'onset_f1': f"{onset_metrics['onset_f1']:.3f}"
+        })
+    
+    # Average losses and metrics
+    num_batches = len(dataloader)
+    for key in total_losses:
+        total_losses[key] /= num_batches
+    for key in total_onset_metrics:
+        total_onset_metrics[key] /= num_batches
+    
+    return total_losses, total_onset_metrics
+
+
+def validate(model, dataloader, criterion, device):
+    """Validate the model."""
+    model.eval()
+    total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
+    total_onset_metrics = {'onset_precision': 0, 'onset_recall': 0, 'onset_f1': 0}
     
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation"):
@@ -392,23 +625,23 @@ def compute_onset_metrics(pred_onset, target_onset, tolerance_frames=5, threshol
             targets = {'onset': onset, 'duration': duration, 'frame': frame}
             loss, loss_dict = criterion(predictions, targets)
             
-            # Compute frame metrics
-            metrics = compute_frame_metrics(predictions['frame'], frame)
+            # Compute onset metrics only
+            onset_metrics = compute_onset_metrics(predictions['onset'], onset)
             
             # Accumulate losses and metrics
             for key in total_losses:
                 total_losses[key] += loss_dict[key]
-            for key in total_metrics:
-                total_metrics[key] += metrics[key]
+            for key in total_onset_metrics:
+                total_onset_metrics[key] += onset_metrics[key]
     
     # Average losses and metrics
     num_batches = len(dataloader)
     for key in total_losses:
         total_losses[key] /= num_batches
-    for key in total_metrics:
-        total_metrics[key] /= num_batches
+    for key in total_onset_metrics:
+        total_onset_metrics[key] /= num_batches
     
-    return total_losses, total_metrics
+    return total_losses, total_onset_metrics
 
 
 def train(data_dir, run_folder, config):
@@ -447,18 +680,21 @@ def train(data_dir, run_folder, config):
     
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Loss and optimizer - use config weights
+    # Loss and optimizer - use config weights and focal loss parameters
     criterion = OnsetDurationLoss(
         onset_weight=config.get('onset_weight', 4.0),
         duration_weight=config.get('duration_weight', 2.0),
         frame_weight=config.get('frame_weight', 1.0),
         duration_mode=config.get('duration_mode', 'log'),
-        onset_pos_weight=config.get('onset_pos_weight', 100.0)  # ADD: use from config
+        use_focal_loss=config.get('use_focal_loss', True),
+        onset_focal_alpha=config.get('onset_focal_alpha', 0.75),
+        onset_focal_gamma=config.get('onset_focal_gamma', 2.0),
+        frame_focal_alpha=config.get('frame_focal_alpha', 0.25),
+        frame_focal_gamma=config.get('frame_focal_gamma', 2.0)
     )
     
     print(f"\nLoss weights:")
     print(f"  Onset: {config.get('onset_weight', 4.0)}")
-    print(f"  Onset pos_weight: {config.get('onset_pos_weight', 100.0)}")  # ADD: print it
     print(f"  Duration: {config.get('duration_weight', 2.0)}")
     print(f"  Frame: {config.get('frame_weight', 1.0)}")
     print(f"  Duration mode: {config.get('duration_mode', 'log')}")
@@ -519,8 +755,8 @@ def train(data_dir, run_folder, config):
               f"Duration: {train_loss['duration_loss']:.4f}, Frame: {train_loss['frame_loss']:.4f}")
         print(f"Val   - Onset: {val_loss['onset_loss']:.4f}, "
               f"Duration: {val_loss['duration_loss']:.4f}, Frame: {val_loss['frame_loss']:.4f}")
-        print(f"Train - Precision: {train_metric['precision']:.4f}, Recall: {train_metric['recall']:.4f}, F1: {train_metric['f1']:.4f}")
-        print(f"Val   - Precision: {val_metric['precision']:.4f}, Recall: {val_metric['recall']:.4f}, F1: {val_metric['f1']:.4f}")
+        print(f"Train Onset - P: {train_metric['onset_precision']:.4f}, R: {train_metric['onset_recall']:.4f}, F1: {train_metric['onset_f1']:.4f}")
+        print(f"Val   Onset - P: {val_metric['onset_precision']:.4f}, R: {val_metric['onset_recall']:.4f}, F1: {val_metric['onset_f1']:.4f}")
         
         # Update scheduler
         if scheduler is not None:

@@ -211,10 +211,12 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
         tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
         cbar1.ax.set_yticklabels(tick_labels, fontsize=8)
         
-        # Panel 2: Frame
-        axes[0, 1].imshow(ground_truth['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        # Panel 2: Frame (FIXED: Added vmin=0, vmax=1)
+        im_frame_gt = axes[0, 1].imshow(ground_truth['frame'].T, aspect='auto', origin='lower', 
+                                         cmap='hot', interpolation='nearest', vmin=0, vmax=1)
         axes[0, 1].set_title(f'Ground Truth: Frame (Active Notes)', fontsize=14, fontweight='bold')
         axes[0, 1].set_ylabel('Piano Keys (88)', fontsize=11)
+        plt.colorbar(im_frame_gt, ax=axes[0, 1])
         
         # Predictions
         # Panel 3: Onset + Duration
@@ -236,11 +238,13 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
         cbar2 = plt.colorbar(im2, ax=axes[1, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
         cbar2.ax.set_yticklabels(tick_labels, fontsize=8)
         
-        # Panel 4: Frame
-        axes[1, 1].imshow(predictions['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        # Panel 4: Frame (FIXED: Added vmin=0, vmax=1)
+        im_frame_pred = axes[1, 1].imshow(predictions['frame'].T, aspect='auto', origin='lower', 
+                                           cmap='hot', interpolation='nearest', vmin=0, vmax=1)
         axes[1, 1].set_title(f'Predicted: Frame (Active Notes)', fontsize=14, fontweight='bold')
         axes[1, 1].set_ylabel('Piano Keys (88)', fontsize=11)
         axes[1, 1].set_xlabel('Time Frames', fontsize=11)
+        plt.colorbar(im_frame_pred, ax=axes[1, 1])
         
     else:
         # Plot only predictions
@@ -266,11 +270,13 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
         tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
         cbar.ax.set_yticklabels(tick_labels, fontsize=8)
         
-        # Panel 2: Frame
-        axes[1].imshow(predictions['frame'].T, aspect='auto', origin='lower', cmap='hot', interpolation='nearest')
+        # Panel 2: Frame (FIXED: Added vmin=0, vmax=1)
+        im_frame = axes[1].imshow(predictions['frame'].T, aspect='auto', origin='lower', 
+                                   cmap='hot', interpolation='nearest', vmin=0, vmax=1)
         axes[1].set_title(f'Predicted: Frame (Active Notes)', fontsize=14, fontweight='bold')
         axes[1].set_ylabel('Piano Keys (88)', fontsize=11)
         axes[1].set_xlabel('Time Frames', fontsize=11)
+        plt.colorbar(im_frame, ax=axes[1])
     
     plt.tight_layout()
     plt.savefig(save_path, dpi=150)
