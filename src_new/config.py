@@ -19,7 +19,7 @@ CONFIG = {
     
     # Training parameters
     'snippet_duration': 3.0,
-    'batch_size': 32,                        # REDUCED for faster testing
+    'batch_size': 8,                        # REDUCED for faster testing
     'learning_rate': 1e-4,
     'num_epochs': 500,                       # REDUCED for quick test
     'hidden_size': 256,
@@ -29,9 +29,9 @@ CONFIG = {
     'weight_decay': 1e-4,
     
     # Multi-task loss weights (UPDATED for onset + duration)
-    'onset_weight': 10.0,                   # INCREASED: Onset detection is the hardest task
+    'onset_weight': 1.0,                   # INCREASED: Onset detection is the hardest task
     'duration_weight': 1.0,                 # DECREASED: Duration is masked (only at onsets), easier task
-    'frame_weight': 0.1,                    # DECREASED: Frame is auxiliary, should not dominate
+    'frame_weight': 1.0,                    # DECREASED: Frame is auxiliary, should not dominate
     'consistency_weight': 0.5,              # Temporal consistency loss weight
     
     # Focal Loss parameters (for handling extreme class imbalance)
@@ -43,8 +43,9 @@ CONFIG = {
     
     # Data augmentation settings
     'snippets_per_file': 50,                # REDUCED for faster testing
-    'data_fraction': 0.15,                     # REDUCED: Use 5% of dataset for quick test
-    
+    'data_fraction': 0.1,                     # REDUCED: Use 5% of dataset for quick test
+    'fixed_snippets': False,                # ONLY True for OVERFIT: Use FIXED snippets - see same data every epoch!
+
     # Model architecture
     'use_cnn_only': False,                  # If True, use CNN-only model (ablation study)
     

@@ -99,103 +99,85 @@ class FocalLoss(nn.Module):
 class OnsetDurationLoss(nn.Module):
     """
     Multi-task loss for onset, duration, and frame prediction.
-    Supports three duration modes:
-    - 'bins': Classification with cross-entropy loss
-    - 'log': Log-duration regression with MSE loss
-    - 'linear': Linear duration regression with MSE loss
-    
-    Uses Focal Loss for onset and frame to handle extreme class imbalance.
+    Supports pos_weight annealing for onset and frame losses.
     """
     def __init__(self, onset_weight=4.0, duration_weight=2.0, frame_weight=1.0, 
-                 duration_mode='log', 
-                 use_focal_loss=True,
-                 onset_focal_alpha=0.75, onset_focal_gamma=2.0,
-                 frame_focal_alpha=0.25, frame_focal_gamma=2.0):
+                 duration_mode='log',
+                 frame_pos_weight=1.0, onset_pos_weight=1.0):
         super(OnsetDurationLoss, self).__init__()
         self.onset_weight = onset_weight
         self.duration_weight = duration_weight
         self.frame_weight = frame_weight
         self.duration_mode = duration_mode
-        self.use_focal_loss = use_focal_loss
         
-        # Loss functions
-        if use_focal_loss:
-            # Focal Loss for onset (extreme imbalance ~0.23% positive)
-            self.onset_loss_fn = FocalLoss(
-                alpha=onset_focal_alpha,  # High alpha for very rare positives
-                gamma=onset_focal_gamma,
-                reduction='mean'
-            )
-            # Focal Loss for frame (moderate imbalance ~5% positive)
-            self.frame_loss_fn = FocalLoss(
-                alpha=frame_focal_alpha,  # Lower alpha for less rare positives
-                gamma=frame_focal_gamma,
-                reduction='mean'
-            )
-            print(f"Using Focal Loss:")
-            print(f"  Onset: α={onset_focal_alpha}, γ={onset_focal_gamma}")
-            print(f"  Frame: α={frame_focal_alpha}, γ={frame_focal_gamma}")
-        else:
-            # Standard BCE loss
-            self.onset_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
-            self.frame_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
-            print(f"Using standard BCE loss (no focal loss)")
+        # Store pos_weights (will be updated each epoch)
+        self.frame_pos_weight = frame_pos_weight
+        self.onset_pos_weight = onset_pos_weight
         
-        self.ce = nn.CrossEntropyLoss(reduction='none')  # Use 'none' for masking
-        self.mse = nn.MSELoss(reduction='none')  # Use 'none' for masking
+        # Loss functions with pos_weight
+        self.onset_loss_fn = None
+        self.frame_loss_fn = None
+        self.update_pos_weights(frame_pos_weight, onset_pos_weight)
+        
+        self.ce = nn.CrossEntropyLoss(reduction='none')
+        self.mse = nn.MSELoss(reduction='none')
+    
+    def update_pos_weights(self, frame_pos_weight, onset_pos_weight):
+        """Update pos_weights for onset and frame losses."""
+        self.frame_pos_weight = frame_pos_weight
+        self.onset_pos_weight = onset_pos_weight
+        
+        # Recreate loss functions with new pos_weights
+        self.frame_loss_fn = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([frame_pos_weight]),
+            reduction='mean'
+        )
+        self.onset_loss_fn = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([onset_pos_weight]),
+            reduction='mean'
+        )
     
     def forward(self, predictions, targets):
         """
         Args:
             predictions: Dict with 'onset', 'duration', 'frame' outputs
-                - onset: (batch, time, 88) - logits
-                - duration: (batch, time, 88, num_bins) for 'bins' mode
-                           or (batch, time, 88) for 'log'/'linear' modes - logits/values
-                - frame: (batch, time, 88) - logits
             targets: Dict with 'onset', 'duration', 'frame' labels
-                - onset: (batch, time, 88) - binary
-                - duration: (batch, time, 88) - bin indices for 'bins' mode
-                           or log/linear duration values for 'log'/'linear' modes
-                - frame: (batch, time, 88) - binary
         
         Returns:
             Total weighted loss and individual losses
         """
-        # Onset loss (Focal Loss or BCE)
+        # Move pos_weight tensors to correct device
+        self.frame_loss_fn.pos_weight = self.frame_loss_fn.pos_weight.to(predictions['frame'].device)
+        self.onset_loss_fn.pos_weight = self.onset_loss_fn.pos_weight.to(predictions['onset'].device)
+        
+        # Onset loss
         onset_loss = self.onset_loss_fn(predictions['onset'], targets['onset'])
         
-        # Duration loss (masked - only compute where onsets occur)
-        onset_mask = targets['onset'] > 0.5  # (batch, time, 88)
+        # Duration loss (masked)
+        onset_mask = targets['onset'] > 0.5
         
         if self.duration_mode == 'bins':
-            # Classification: cross-entropy loss
             batch_size, time_steps, num_keys, num_bins = predictions['duration'].shape
-            
-            # Reshape for cross-entropy: (batch*time*keys, num_bins)
             duration_pred_flat = predictions['duration'].reshape(-1, num_bins)
             duration_target_flat = targets['duration'].reshape(-1).long()
             onset_mask_flat = onset_mask.reshape(-1)
             
-            # Compute CE loss for all positions
             ce_loss = self.ce(duration_pred_flat, duration_target_flat)
             
-            # Apply mask and take mean over onset positions only
             if onset_mask_flat.sum() > 0:
                 duration_loss = ce_loss[onset_mask_flat].mean()
             else:
                 duration_loss = torch.tensor(0.0, device=predictions['onset'].device)
         
         else:
-            # Regression: MSE loss (log or linear)
             mse_loss = self.mse(predictions['duration'], targets['duration'])
             
-            # Apply mask and take mean over onset positions only
             if onset_mask.sum() > 0:
                 duration_loss = mse_loss[onset_mask].mean()
             else:
                 duration_loss = torch.tensor(0.0, device=predictions['onset'].device)
         
-        # Frame loss (Focal Loss or BCE)
+        # Frame loss
         frame_loss = self.frame_loss_fn(predictions['frame'], targets['frame'])
         
         # Total loss
@@ -655,6 +637,18 @@ def train(data_dir, run_folder, config):
     # Create datasets and loaders
     train_loader, val_loader = create_datasets_and_loaders(data_dir, config)
     
+    # Compute initial pos_weights from data sparsity
+    print("\nComputing pos_weights from data sparsity...")
+    sample_batch = next(iter(train_loader))
+    frame_ratio = sample_batch['frame'].mean().item()
+    onset_ratio = sample_batch['onset'].mean().item()
+    
+    initial_frame_pos_weight = (1.0 - frame_ratio) / frame_ratio if frame_ratio > 0 else 1.0
+    initial_onset_pos_weight = (1.0 - onset_ratio) / onset_ratio if onset_ratio > 0 else 1.0
+    
+    print(f"Frame sparsity: {frame_ratio*100:.2f}% → initial pos_weight: {initial_frame_pos_weight:.1f}")
+    print(f"Onset sparsity: {onset_ratio*100:.2f}% → initial pos_weight: {initial_onset_pos_weight:.1f}")
+    
     # Create model - choose based on config
     if config.get('use_cnn_only', False):
         print("\n" + "="*80)
@@ -680,17 +674,14 @@ def train(data_dir, run_folder, config):
     
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
     
-    # Loss and optimizer - use config weights and focal loss parameters
+    # Loss with initial pos_weights
     criterion = OnsetDurationLoss(
         onset_weight=config.get('onset_weight', 4.0),
         duration_weight=config.get('duration_weight', 2.0),
         frame_weight=config.get('frame_weight', 1.0),
         duration_mode=config.get('duration_mode', 'log'),
-        use_focal_loss=config.get('use_focal_loss', True),
-        onset_focal_alpha=config.get('onset_focal_alpha', 0.75),
-        onset_focal_gamma=config.get('onset_focal_gamma', 2.0),
-        frame_focal_alpha=config.get('frame_focal_alpha', 0.25),
-        frame_focal_gamma=config.get('frame_focal_gamma', 2.0)
+        frame_pos_weight=initial_frame_pos_weight,
+        onset_pos_weight=initial_onset_pos_weight
     )
     
     print(f"\nLoss weights:")
@@ -698,6 +689,7 @@ def train(data_dir, run_folder, config):
     print(f"  Duration: {config.get('duration_weight', 2.0)}")
     print(f"  Frame: {config.get('frame_weight', 1.0)}")
     print(f"  Duration mode: {config.get('duration_mode', 'log')}")
+    print(f"\nPos_weight annealing: epochs 0-50")
     
     optimizer = optim.Adam(
         model.parameters(),
@@ -737,12 +729,44 @@ def train(data_dir, run_folder, config):
     # Training loop
     print(f"\nStarting training from epoch {start_epoch + 1}\n")
     
+    # Adaptive annealing state
+    annealing_triggered = False
+    annealing_start_epoch = None
+    anneal_duration = 30
+    
     for epoch in range(start_epoch, config['num_epochs']):
         print(f"Epoch {epoch + 1}/{config['num_epochs']}")
         
         # Train and validate
         train_loss, train_metric = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_metric = validate(model, val_loader, criterion, device)
+        
+        # Check if we should trigger annealing
+        if not annealing_triggered and train_metric['onset_f1'] >= 0.40:
+            annealing_triggered = True
+            annealing_start_epoch = epoch
+            print(f"✓ Train onset F1 reached 40%, starting pos_weight annealing over next {anneal_duration} epochs")
+        
+        # Update pos_weights with adaptive annealing schedule
+        if not annealing_triggered:
+            # Keep initial high weights
+            current_frame_pos_weight = initial_frame_pos_weight
+            current_onset_pos_weight = initial_onset_pos_weight
+        elif (epoch - annealing_start_epoch) < anneal_duration:
+            # Anneal to 1.0
+            progress = (epoch - annealing_start_epoch) / anneal_duration
+            current_frame_pos_weight = 1.0 + (initial_frame_pos_weight - 1.0) * (1.0 - progress)
+            current_onset_pos_weight = 1.0 + (initial_onset_pos_weight - 1.0) * (1.0 - progress)
+        else:
+            # Fixed at 1.0
+            current_frame_pos_weight = 1.0
+            current_onset_pos_weight = 1.0
+        
+        criterion.update_pos_weights(current_frame_pos_weight, current_onset_pos_weight)
+        
+        # Print pos_weights during annealing or at start
+        if epoch < 5 or (annealing_triggered and (epoch - annealing_start_epoch) < anneal_duration):
+            print(f"Pos_weights: frame={current_frame_pos_weight:.2f}, onset={current_onset_pos_weight:.2f}")
         
         train_losses.append(train_loss['total_loss'])
         val_losses.append(val_loss['total_loss'])
