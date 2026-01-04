@@ -16,30 +16,40 @@ CONFIG = {
     'duration_mode': 'log',                 # 'bins' for classification, 'log' for log-regression, 'linear' for linear regression
     'num_duration_bins': 8,                 # Number of duration bins (only used if duration_mode='bins')
     'min_note_duration': 0.05,              # Minimum note duration in seconds
+    'clip_duration_to_snippet': True,       # If True, clip target durations to snippet boundaries
     
     # Training parameters
-    'snippet_duration': 3.0,
+    'snippet_bins': 256,                    # Snippet length in bins (2.56s at 100fps). Must be divisible by 64.
     'batch_size': 8,                        # REDUCED for faster testing
     'learning_rate': 1e-4,
     'num_epochs': 500,                       # REDUCED for quick test
-    'hidden_size': 256,
-    'num_heads': 8,
-    'num_layers': 4,
+    'hidden_size': 256,                     # Legacy param, kept for compatibility
     'dropout': 0.2,
     'weight_decay': 1e-4,
     
-    # Multi-task loss weights (UPDATED for onset + duration)
-    'onset_weight': 1.0,                   # INCREASED: Onset detection is the hardest task
-    'duration_weight': 1.0,                 # DECREASED: Duration is masked (only at onsets), easier task
-    'frame_weight': 1.0,                    # DECREASED: Frame is auxiliary, should not dominate
-    'consistency_weight': 0.5,              # Temporal consistency loss weight
+    # Multi-task loss weights (Simplified for U-Net)
+    'onset_loss_weight': 4.0,
+    'duration_loss_weight': 2.0,
+    'frame_loss_weight': 1.0,
     
-    # Focal Loss parameters (for handling extreme class imbalance)
-    'use_focal_loss': True,                 # Use Focal Loss instead of BCE
-    'onset_focal_alpha': 0.90,              # INCREASED: Alpha for onset (need more focus on rare positives)
-    'onset_focal_gamma': 2.0,               # Gamma for onset (2.0 = standard)
-    'frame_focal_alpha': 0.25,              # Alpha for frame (lower since frames are less rare)
-    'frame_focal_gamma': 2.0,               # Gamma for frame
+    # Smooth Loss parameters (NEW)
+    'onset_tolerance_initial_sigma': 3.0,           # Initial σ in bins (30ms at 100fps)
+    'onset_tolerance_final_sigma': 0.1,             # Final σ (nearly delta function)
+    'onset_tolerance_anneal_f1_threshold': 0.4,     # Start annealing when train F1 > this
+    'onset_tolerance_anneal_epochs': 50,            # Anneal over N epochs
+
+    # U-Net Architecture parameters (NEW)
+    'use_unet': True,                               # Use U-Net architecture
+    'unet_encoder_channels': [64, 128, 256],        # Channel progression in encoder
+    'unet_decoder_channels': [128, 64, 32],         # Channel progression in decoder
+    'unet_downsample_factor': 4,                    # Time reduction per layer (4^3 = 64 total)
+    'unet_num_layers': 3,                           # Number of encoder/decoder layers
+    
+    # Transformer parameters (Updated for bottleneck)
+    'transformer_dim': 512,                         # INCREASED from 256
+    'num_heads': 16,                                # INCREASED from 8
+    'num_layers': 8,                                # INCREASED from 4
+    'transformer_ff_dim': 2048,                     # Explicit feedforward dim
     
     # Data augmentation settings
     'snippets_per_file': 50,                # REDUCED for faster testing
@@ -68,7 +78,28 @@ CONFIG = {
 
 # Derived constants
 CONFIG['hop_length'] = int(CONFIG['sample_rate'] / CONFIG['roll_fps'])  # Hop length for STFT
-CONFIG['snippet_frames'] = int(CONFIG['snippet_duration'] * CONFIG['roll_fps'])  # Frames per snippet
+
+def validate_config(config):
+    """Validate config parameters."""
+    if config.get('use_unet', False):
+        # Check snippet_bins divisibility
+        total_reduction = config['unet_downsample_factor'] ** config['unet_num_layers']
+        assert config['snippet_bins'] % total_reduction == 0, \
+            f"snippet_bins ({config['snippet_bins']}) must be divisible by {total_reduction}"
+        
+        # Check transformer parameters match bottleneck
+        expected_bottleneck_size = config['snippet_bins'] // total_reduction
+        print(f"✓ Snippet bins: {config['snippet_bins']}")
+        print(f"✓ Bottleneck size: {expected_bottleneck_size} frames")
+        print(f"✓ Transformer will see {expected_bottleneck_size} time steps")
+    
+    # Check sigma annealing makes sense
+    assert config['onset_tolerance_initial_sigma'] > config['onset_tolerance_final_sigma'], \
+        "Initial sigma must be > final sigma"
+    
+    print(f"✓ Config validation passed")
+
+validate_config(CONFIG)
 
 MIN_PITCH = 21  # Lowest MIDI pitch for 88-key piano (A0)
 MAX_PITCH = 108  # Highest MIDI pitch for 88-key piano (C8)

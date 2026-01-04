@@ -268,20 +268,33 @@ class PianoTranscriptionModelCNNOnly(nn.Module):
     CNN-only model (no Transformer) for ablation study.
     Frame-by-frame prediction without temporal context.
     """
-    def __init__(self, n_mels=128, hidden_size=256, num_outputs=91, dropout=0.1):
+    def __init__(self, n_mels=128, hidden_size=256, num_keys=88, dropout=0.1, duration_mode='bins', num_duration_bins=8):
         super(PianoTranscriptionModelCNNOnly, self).__init__()
+        
+        self.duration_mode = duration_mode
+        self.num_duration_bins = num_duration_bins
         
         # Convolutional feature extractor
         self.feature_extractor = ConvolutionalFeatureExtractor(n_mels, hidden_size)
         
         # Direct output projection (no transformer)
-        self.output_projection = nn.Sequential(
+        self.projection = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, num_outputs)
+            nn.Dropout(dropout)
         )
+
+        # Heads
+        self.onset_head = nn.Linear(hidden_size, num_keys)
+        self.frame_head = nn.Linear(hidden_size, num_keys)
+        
+        if duration_mode == 'bins':
+            self.duration_head = nn.Linear(hidden_size, num_keys * num_duration_bins)
+        else:
+            self.duration_head = nn.Linear(hidden_size, num_keys)
+            
+        nn.init.constant_(self.onset_head.bias, -4.6)
         
     def forward(self, x):
         """
@@ -291,23 +304,295 @@ class PianoTranscriptionModelCNNOnly(nn.Module):
             x: Input spectrogram (batch_size, 1, n_mels, time_frames)
             
         Returns:
-            Output piano roll predictions (batch_size, time_frames, num_outputs)
+            Dictionary with 'onset', 'duration', 'frame' predictions
         """
         # Extract features with CNN
         x = self.feature_extractor(x)  # (batch_size, time_frames, hidden_size)
         
-        # Direct projection to outputs (no temporal modeling)
-        x = self.output_projection(x)  # (batch_size, time_frames, num_outputs)
+        # Projection
+        x = self.projection(x)
         
-        # Apply sigmoid for binary predictions
-        x = torch.sigmoid(x)
+        # Heads
+        onset = self.onset_head(x)
+        frame = self.frame_head(x)
+        
+        duration = self.duration_head(x)
+        if self.duration_mode == 'bins':
+            batch_size, time_frames, _ = x.shape
+            duration = duration.view(batch_size, time_frames, -1, self.num_duration_bins)
+        
+        return {
+            'onset': onset,
+            'duration': duration,
+            'frame': frame
+        }
+
+
+class UNetEncoder(nn.Module):
+    """
+    Encoder path with time+frequency downsampling.
+    Returns features at each layer for skip connections.
+    """
+    def __init__(self, input_channels, encoder_channels, downsample_factor, num_layers):
+        super(UNetEncoder, self).__init__()
+        self.layers = nn.ModuleList()
+        self.downsample_factor = downsample_factor
+        
+        in_c = input_channels
+        for out_c in encoder_channels:
+            self.layers.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=(downsample_factor, downsample_factor), 
+                           stride=(downsample_factor, downsample_factor))
+            ))
+            in_c = out_c
+            
+    def forward(self, x):
+        # Returns: (encoder_features_list, bottleneck_features)
+        features = []
+        for layer in self.layers:
+            x = layer(x)
+            features.append(x)
+        return features[:-1], features[-1]
+
+
+class UNetDecoder(nn.Module):
+    """
+    Decoder path with transposed convolutions for upsampling.
+    Uses skip connections from encoder.
+    """
+    def __init__(self, decoder_channels, upsample_factor, num_layers, encoder_channels):
+        super(UNetDecoder, self).__init__()
+        self.layers = nn.ModuleList()
+        self.upsample_factor = upsample_factor
+        
+        in_c = encoder_channels[-1]  # Start with bottleneck channels
+        skip_channels = encoder_channels[:-1][::-1]  # Reverse encoder channels for skip connections
+        
+        for i, out_c in enumerate(decoder_channels):
+            skip_c = skip_channels[i] if i < len(skip_channels) else 0
+            self.layers.append(nn.ModuleDict({
+                'up': nn.ConvTranspose2d(in_c, out_c, kernel_size=upsample_factor, stride=upsample_factor),
+                'conv': nn.Sequential(
+                    nn.Conv2d(out_c + skip_c, out_c, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(out_c),
+                    nn.ReLU()
+                )
+            }))
+            in_c = out_c
+
+    def forward(self, x, skip_connections):
+        skips = skip_connections[::-1]
+        for i, layer in enumerate(self.layers):
+            x = layer['up'](x)
+            if i < len(skips):
+                skip = skips[i]
+                if x.shape != skip.shape:
+                    x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
+                x = torch.cat([x, skip], dim=1)
+            x = layer['conv'](x)
+        return x
+
+
+class TransformerBottleneck(nn.Module):
+    """
+    Transformer at bottleneck (sees T/64 frames).
+    Operates on flattened spatial features.
+    """
+    def __init__(self, in_channels, freq_bins, transformer_dim, num_heads, num_layers, ff_dim, dropout=0.1):
+        super(TransformerBottleneck, self).__init__()
+        
+        self.input_dim = in_channels * freq_bins
+        self.transformer_dim = transformer_dim
+        
+        # Projections
+        self.input_proj = nn.Linear(self.input_dim, transformer_dim)
+        self.output_proj = nn.Linear(transformer_dim, self.input_dim)
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(transformer_dim, dropout=dropout)
+        
+        # Transformer
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=transformer_dim,
+            nhead=num_heads,
+            dim_feedforward=ff_dim,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+    def forward(self, x):
+        # Input: (B, C, H, T)
+        B, C, H, T = x.shape
+        
+        # Reshape to (B, T, C*H)
+        x = x.permute(0, 3, 1, 2).reshape(B, T, C * H)
+        
+        # Project and Transformer
+        x = self.input_proj(x)
+        x = self.pos_encoder(x)
+        x = self.transformer(x)
+        x = self.output_proj(x)
+        
+        # Reshape back to (B, C, H, T)
+        x = x.reshape(B, T, C, H).permute(0, 2, 3, 1)
         
         return x
+
+
+class PianoTranscriptionModelUNet(nn.Module):
+    """
+    U-Net architecture for piano transcription.
+    """
+    def __init__(self, config):
+        super(PianoTranscriptionModelUNet, self).__init__()
+        
+        self.duration_mode = config['duration_mode']
+        self.num_duration_bins = config.get('num_duration_bins', 8)
+        
+        # Encoder
+        self.encoder = nn.ModuleList()
+        in_c = 1
+        for out_c in config['unet_encoder_channels']:
+            self.encoder.append(nn.Sequential(
+                nn.Conv2d(in_c, out_c, kernel_size=3, padding=1),
+                nn.BatchNorm2d(out_c),
+                nn.ReLU(),
+                nn.MaxPool2d(kernel_size=(2, 4), stride=(2, 4))  # Freq / 2, Time / 4
+            ))
+            in_c = out_c
+            
+        # Bottleneck dims
+        bottleneck_freq = 352 // (2 ** config['unet_num_layers'])
+        bottleneck_channels = config['unet_encoder_channels'][-1]
+        
+        self.transformer = TransformerBottleneck(
+            in_channels=bottleneck_channels,
+            freq_bins=bottleneck_freq,
+            transformer_dim=config['transformer_dim'],
+            num_heads=config['num_heads'],
+            num_layers=config['num_layers'],
+            ff_dim=config['transformer_ff_dim'],
+            dropout=config['dropout']
+        )
+        
+        # Decoder
+        self.decoder = nn.ModuleList()
+        skip_channels = config['unet_encoder_channels'][:-1][::-1]
+        decoder_channels = config['unet_decoder_channels']
+        
+        in_c = bottleneck_channels
+        
+        for i, out_c in enumerate(decoder_channels):
+            skip_c = skip_channels[i] if i < len(skip_channels) else 0
+            
+            self.decoder.append(nn.ModuleDict({
+                'up': nn.ConvTranspose2d(in_c, out_c, kernel_size=(2, 4), stride=(2, 4)),
+                'conv': nn.Sequential(
+                    nn.Conv2d(out_c + skip_c, out_c, kernel_size=3, padding=1),
+                    nn.BatchNorm2d(out_c),
+                    nn.ReLU()
+                )
+            }))
+            in_c = out_c
+            
+        # Final projection to 88 keys
+        self.final_conv = nn.Conv2d(decoder_channels[-1], 1, kernel_size=1)
+        self.freq_reduction = nn.Conv2d(1, 1, kernel_size=(4, 1), stride=(4, 1))
+        self.feature_reduction = nn.Conv2d(decoder_channels[-1], 64, kernel_size=(4, 1), stride=(4, 1))
+        
+        self.onset_head = nn.Linear(64, 1)
+        self.frame_head = nn.Linear(64, 1)
+        
+        if self.duration_mode == 'bins':
+            self.duration_head = nn.Linear(64, self.num_duration_bins)
+        else:
+            self.duration_head = nn.Linear(64, 1)
+            
+        nn.init.constant_(self.onset_head.bias, -4.6)
+
+    def forward(self, x):
+        # Encoder
+        skips = []
+        for layer in self.encoder:
+            x = layer(x)
+            skips.append(x)
+            
+        bottleneck = skips.pop()
+        
+        # Transformer
+        bottleneck = self.transformer(bottleneck)
+        
+        # Decoder
+        x = bottleneck
+        skips = skips[::-1]
+        
+        for i, layer in enumerate(self.decoder):
+            x = layer['up'](x)
+            
+            if i < len(skips):
+                skip = skips[i]
+                if x.shape != skip.shape:
+                    x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
+                x = torch.cat([x, skip], dim=1)
+            
+            x = layer['conv'](x)
+            
+        x = self.feature_reduction(x)
+        x = x.permute(0, 3, 2, 1)
+        
+        onset = self.onset_head(x).squeeze(-1)
+        frame = self.frame_head(x).squeeze(-1)
+        
+        duration = self.duration_head(x)
+        if self.duration_mode != 'bins':
+            duration = duration.squeeze(-1)
+            
+        return {
+            'onset': onset,
+            'duration': duration,
+            'frame': frame
+        }
 
 
 if __name__ == "__main__":
     from config import CONFIG, NUM_OUTPUTS
     
+    if CONFIG.get('use_unet', False):
+        print("="*80)
+        print("TESTING U-NET ARCHITECTURE")
+        print("="*80)
+        
+        model = PianoTranscriptionModelUNet(CONFIG)
+        
+        # Create dummy input
+        batch_size = 2
+        dummy_input = torch.randn(batch_size, 1, CONFIG['n_mels'], CONFIG['snippet_bins'])
+        
+        print(f"Input shape: {dummy_input.shape}")
+        
+        # Forward pass
+        output = model(dummy_input)
+        
+        print(f"Output shapes:")
+        print(f"  - onset: {output['onset'].shape}")
+        print(f"  - duration: {output['duration'].shape}")
+        print(f"  - frame: {output['frame'].shape}")
+        
+        # Validate shapes
+        assert output['onset'].shape == (batch_size, CONFIG['snippet_bins'], 88)
+        assert output['frame'].shape == (batch_size, CONFIG['snippet_bins'], 88)
+        print(f"✓ Output shapes correct")
+        
+        # Count parameters
+        total_params = sum(p.numel() for p in model.parameters())
+        print(f"TOTAL PARAMS: {total_params:,}")
+        print("="*80)
+        exit()
+
     # Test onset + duration model
     print("="*80)
     print("ONSET + DURATION MODEL (CNN + Transformer)")
@@ -365,13 +650,18 @@ if __name__ == "__main__":
     model_cnn = PianoTranscriptionModelCNNOnly(
         n_mels=CONFIG['n_mels'],
         hidden_size=CONFIG['hidden_size'],
-        num_outputs=NUM_OUTPUTS,
-        dropout=CONFIG['dropout']
+        num_keys=CONFIG['num_keys'],
+        dropout=CONFIG['dropout'],
+        duration_mode=CONFIG['duration_mode'],
+        num_duration_bins=CONFIG['num_duration_bins']
     )
     
     output_cnn = model_cnn(dummy_input)
     print(f"Input shape: {dummy_input.shape}")
-    print(f"Output shape: {output_cnn.shape}")
+    print(f"Output shapes:")
+    print(f"  - onset: {output_cnn['onset'].shape}")
+    print(f"  - duration: {output_cnn['duration'].shape}")
+    print(f"  - frame: {output_cnn['frame'].shape}")
     print(f"Model parameters: {sum(p.numel() for p in model_cnn.parameters()):,}")
     
     print("\n" + "="*80)

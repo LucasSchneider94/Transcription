@@ -12,7 +12,7 @@ import pretty_midi
 import json
 from pathlib import Path
 
-from model import PianoTranscriptionModel
+from model import PianoTranscriptionModel, PianoTranscriptionModelUNet, PianoTranscriptionModelCNNOnly
 from config import CONFIG, MIN_PITCH
 from data_preparation import create_piano_roll_with_onsets_durations, DURATION_BINS, NUM_DURATION_BINS, get_duration_bin_label
 from inference_config import INFERENCE_CONFIG
@@ -34,17 +34,32 @@ def load_model(model_path, device):
     else:
         print("⚠️  No config.json found, using default CONFIG")
     
-    # Create model
-    model = PianoTranscriptionModel(
-        input_features=model_config.get('n_mels', 352),
-        num_keys=model_config.get('num_keys', 88),
-        transformer_dim=model_config.get('hidden_size', 256),
-        num_heads=model_config.get('num_heads', 8),
-        num_layers=model_config.get('num_layers', 4),
-        dropout=model_config.get('dropout', 0.2),
-        duration_mode=model_config.get('duration_mode', 'log'),
-        num_duration_bins=model_config.get('num_duration_bins', 8)
-    ).to(device)
+    # Create model based on config
+    if model_config.get('use_unet', False):
+        print("Loading U-Net model...")
+        model = PianoTranscriptionModelUNet(model_config).to(device)
+    elif model_config.get('use_cnn_only', False):
+        print("Loading CNN-only model...")
+        model = PianoTranscriptionModelCNNOnly(
+            n_mels=model_config.get('n_mels', 352),
+            hidden_size=model_config.get('hidden_size', 256),
+            num_keys=model_config.get('num_keys', 88),
+            dropout=model_config.get('dropout', 0.2),
+            duration_mode=model_config.get('duration_mode', 'log'),
+            num_duration_bins=model_config.get('num_duration_bins', 8)
+        ).to(device)
+    else:
+        print("Loading Standard Transformer model...")
+        model = PianoTranscriptionModel(
+            input_features=model_config.get('n_mels', 352),
+            num_keys=model_config.get('num_keys', 88),
+            transformer_dim=model_config.get('hidden_size', 256),
+            num_heads=model_config.get('num_heads', 8),
+            num_layers=model_config.get('num_layers', 4),
+            dropout=model_config.get('dropout', 0.2),
+            duration_mode=model_config.get('duration_mode', 'log'),
+            num_duration_bins=model_config.get('num_duration_bins', 8)
+        ).to(device)
     
     # Load weights
     model.load_state_dict(torch.load(model_path, map_location=device))

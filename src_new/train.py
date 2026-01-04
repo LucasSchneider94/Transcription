@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import os
 import json
@@ -17,7 +18,7 @@ from config import CONFIG, NUM_OUTPUTS
 # For overfitting test, uncomment the line below and comment out the line above:
 #from config_overfit import CONFIG_OVERFIT as CONFIG, NUM_OUTPUTS
 
-from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly
+from model import PianoTranscriptionModel, PianoTranscriptionModelCNNOnly, PianoTranscriptionModelUNet
 from dataset import PianoTranscriptionDataset, duration_to_log_duration, log_duration_to_duration
 from utils import (
     get_next_run_folder,
@@ -100,15 +101,18 @@ class OnsetDurationLoss(nn.Module):
     """
     Multi-task loss for onset, duration, and frame prediction.
     Supports pos_weight annealing for onset and frame losses.
+    Supports Gaussian smoothing for onset targets (sigma annealing).
     """
     def __init__(self, onset_weight=4.0, duration_weight=2.0, frame_weight=1.0, 
                  duration_mode='log',
-                 frame_pos_weight=1.0, onset_pos_weight=1.0):
+                 frame_pos_weight=1.0, onset_pos_weight=1.0,
+                 current_sigma=0.0):
         super(OnsetDurationLoss, self).__init__()
         self.onset_weight = onset_weight
         self.duration_weight = duration_weight
         self.frame_weight = frame_weight
         self.duration_mode = duration_mode
+        self.current_sigma = current_sigma
         
         # Store pos_weights (will be updated each epoch)
         self.frame_pos_weight = frame_pos_weight
@@ -136,6 +140,50 @@ class OnsetDurationLoss(nn.Module):
             pos_weight=torch.tensor([onset_pos_weight]),
             reduction='mean'
         )
+
+    def update_sigma(self, sigma):
+        """Update sigma for Gaussian smoothing."""
+        self.current_sigma = sigma
+
+    def apply_gaussian_smoothing(self, targets, sigma):
+        """
+        Apply Gaussian smoothing to binary targets along time dimension.
+        Args:
+            targets: (Batch, Time, 88)
+            sigma: Standard deviation in frames
+        Returns:
+            Smoothed targets (Batch, Time, 88)
+        """
+        if sigma <= 0.1:
+            return targets
+            
+        B, T, K = targets.shape
+        
+        # Create kernel
+        kernel_size = int(6 * sigma) + 1
+        if kernel_size % 2 == 0: kernel_size += 1
+        
+        x = torch.arange(kernel_size, device=targets.device) - kernel_size // 2
+        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+        # Normalize peak to 1.0 so onsets remain at 1.0 (soft labels)
+        kernel = kernel / kernel.max()
+        
+        kernel = kernel.view(1, 1, -1) # (Out, In, Time) -> (1, 1, K)
+        
+        # Reshape targets for conv1d: (B*K, 1, T)
+        targets_reshaped = targets.permute(0, 2, 1).reshape(B*K, 1, T)
+        
+        # Pad to maintain size
+        pad = kernel_size // 2
+        
+        # Conv1d
+        smoothed = F.conv1d(targets_reshaped, kernel, padding=pad)
+        
+        # Reshape back: (B*K, 1, T) -> (B, K, T) -> (B, T, K)
+        smoothed = smoothed.view(B, K, T).permute(0, 2, 1)
+        
+        # Clamp to [0, 1]
+        return torch.clamp(smoothed, 0, 1)
     
     def forward(self, predictions, targets):
         """
@@ -150,8 +198,12 @@ class OnsetDurationLoss(nn.Module):
         self.frame_loss_fn.pos_weight = self.frame_loss_fn.pos_weight.to(predictions['frame'].device)
         self.onset_loss_fn.pos_weight = self.onset_loss_fn.pos_weight.to(predictions['onset'].device)
         
-        # Onset loss
-        onset_loss = self.onset_loss_fn(predictions['onset'], targets['onset'])
+        # Onset loss with optional smoothing
+        onset_targets = targets['onset']
+        if self.current_sigma > 0.1:
+            onset_targets = self.apply_gaussian_smoothing(onset_targets, self.current_sigma)
+            
+        onset_loss = self.onset_loss_fn(predictions['onset'], onset_targets)
         
         # Duration loss (masked)
         onset_mask = targets['onset'] > 0.5
@@ -306,26 +358,28 @@ def create_datasets_and_loaders(data_dir, config):
     # Create datasets with duration_mode from config
     train_dataset = PianoTranscriptionDataset(
         data_dir,
-        config['snippet_frames'],
+        config['snippet_bins'],
         snippets_per_file=config.get('snippets_per_file', 20),
         file_indices=train_indices,
         file_list=all_files,
         seed=42,
         fixed_snippets=config.get('fixed_snippets', False),
         preload_into_ram=config.get('preload_into_ram', True),
-        duration_mode=config.get('duration_mode', 'log')
+        duration_mode=config.get('duration_mode', 'log'),
+        clip_duration=config.get('clip_duration_to_snippet', True)
     )
     
     val_dataset = PianoTranscriptionDataset(
         data_dir,
-        config['snippet_frames'],
+        config['snippet_bins'],
         snippets_per_file=config.get('snippets_per_file', 20),
         file_indices=val_indices,
         file_list=all_files,
         seed=42,
         fixed_snippets=config.get('fixed_snippets', False),
         preload_into_ram=config.get('preload_into_ram', True),
-        duration_mode=config.get('duration_mode', 'log')
+        duration_mode=config.get('duration_mode', 'log'),
+        clip_duration=config.get('clip_duration_to_snippet', True)
     )
     
     print(f"\nDataset summary:")
@@ -650,15 +704,22 @@ def train(data_dir, run_folder, config):
     print(f"Onset sparsity: {onset_ratio*100:.2f}% → initial pos_weight: {initial_onset_pos_weight:.1f}")
     
     # Create model - choose based on config
-    if config.get('use_cnn_only', False):
+    if config.get('use_unet', False):
+        print("\n" + "="*80)
+        print("Using U-Net Architecture")
+        print("="*80 + "\n")
+        model = PianoTranscriptionModelUNet(config).to(device)
+    elif config.get('use_cnn_only', False):
         print("\n" + "="*80)
         print("ABLATION STUDY: Using CNN-only model (no Transformer)")
         print("="*80 + "\n")
         model = PianoTranscriptionModelCNNOnly(
             n_mels=config['n_mels'],
             hidden_size=config['hidden_size'],
-            num_outputs=NUM_OUTPUTS,
-            dropout=config['dropout']
+            num_keys=config['num_keys'],
+            dropout=config['dropout'],
+            duration_mode=config.get('duration_mode', 'log'),
+            num_duration_bins=config.get('num_duration_bins', 8)
         ).to(device)
     else:
         model = PianoTranscriptionModel(
@@ -676,20 +737,34 @@ def train(data_dir, run_folder, config):
     
     # Loss with initial pos_weights
     criterion = OnsetDurationLoss(
-        onset_weight=config.get('onset_weight', 4.0),
-        duration_weight=config.get('duration_weight', 2.0),
-        frame_weight=config.get('frame_weight', 1.0),
+        onset_weight=config.get('onset_loss_weight', 4.0),
+        duration_weight=config.get('duration_loss_weight', 2.0),
+        frame_weight=config.get('frame_loss_weight', 1.0),
         duration_mode=config.get('duration_mode', 'log'),
         frame_pos_weight=initial_frame_pos_weight,
-        onset_pos_weight=initial_onset_pos_weight
+        onset_pos_weight=initial_onset_pos_weight,
+        current_sigma=config.get('onset_tolerance_initial_sigma', 0.0)
     )
     
     print(f"\nLoss weights:")
-    print(f"  Onset: {config.get('onset_weight', 4.0)}")
-    print(f"  Duration: {config.get('duration_weight', 2.0)}")
-    print(f"  Frame: {config.get('frame_weight', 1.0)}")
+    print(f"  Onset: {config.get('onset_loss_weight', 4.0)}")
+    print(f"  Duration: {config.get('duration_loss_weight', 2.0)}")
+    print(f"  Frame: {config.get('frame_loss_weight', 1.0)}")
     print(f"  Duration mode: {config.get('duration_mode', 'log')}")
     print(f"\nPos_weight annealing: epochs 0-50")
+    
+    # Sigma annealing setup
+    initial_sigma = config.get('onset_tolerance_initial_sigma', 0.0)
+    final_sigma = config.get('onset_tolerance_final_sigma', 0.0)
+    sigma_anneal_epochs = config.get('onset_tolerance_anneal_epochs', 50)
+    sigma_anneal_threshold = config.get('onset_tolerance_anneal_f1_threshold', 0.4)
+    
+    if initial_sigma > 0:
+        print(f"Gaussian Onset Smoothing enabled:")
+        print(f"  Initial sigma: {initial_sigma}")
+        print(f"  Final sigma: {final_sigma}")
+        print(f"  Annealing starts when F1 > {sigma_anneal_threshold}")
+        print(f"  Annealing duration: {sigma_anneal_epochs} epochs")
     
     optimizer = optim.Adam(
         model.parameters(),
@@ -726,6 +801,9 @@ def train(data_dir, run_folder, config):
     # Save config to run folder
     save_config_to_run_folder(config, run_folder)
     
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=run_folder)
+    
     # Training loop
     print(f"\nStarting training from epoch {start_epoch + 1}\n")
     
@@ -734,6 +812,10 @@ def train(data_dir, run_folder, config):
     annealing_start_epoch = None
     anneal_duration = 30
     
+    # Sigma annealing state
+    sigma_annealing_triggered = False
+    sigma_annealing_start_epoch = None
+    
     for epoch in range(start_epoch, config['num_epochs']):
         print(f"Epoch {epoch + 1}/{config['num_epochs']}")
         
@@ -741,11 +823,17 @@ def train(data_dir, run_folder, config):
         train_loss, train_metric = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_metric = validate(model, val_loader, criterion, device)
         
-        # Check if we should trigger annealing
+        # Check if we should trigger pos_weight annealing
         if not annealing_triggered and train_metric['onset_f1'] >= 0.40:
             annealing_triggered = True
             annealing_start_epoch = epoch
             print(f"✓ Train onset F1 reached 40%, starting pos_weight annealing over next {anneal_duration} epochs")
+            
+        # Check if we should trigger sigma annealing
+        if initial_sigma > 0 and not sigma_annealing_triggered and train_metric['onset_f1'] >= sigma_anneal_threshold:
+            sigma_annealing_triggered = True
+            sigma_annealing_start_epoch = epoch
+            print(f"✓ Train onset F1 reached {sigma_anneal_threshold}, starting sigma annealing")
         
         # Update pos_weights with adaptive annealing schedule
         if not annealing_triggered:
@@ -764,14 +852,54 @@ def train(data_dir, run_folder, config):
         
         criterion.update_pos_weights(current_frame_pos_weight, current_onset_pos_weight)
         
-        # Print pos_weights during annealing or at start
-        if epoch < 5 or (annealing_triggered and (epoch - annealing_start_epoch) < anneal_duration):
-            print(f"Pos_weights: frame={current_frame_pos_weight:.2f}, onset={current_onset_pos_weight:.2f}")
+        # Update sigma
+        current_sigma = initial_sigma
+        if initial_sigma > 0:
+            if sigma_annealing_triggered:
+                progress = min(1.0, (epoch - sigma_annealing_start_epoch) / sigma_anneal_epochs)
+                current_sigma = initial_sigma + (final_sigma - initial_sigma) * progress
+            
+            criterion.update_sigma(current_sigma)
+        
+        # Print pos_weights and sigma
+        if epoch < 5 or (annealing_triggered and (epoch - annealing_start_epoch) < anneal_duration) or (sigma_annealing_triggered and (epoch - sigma_annealing_start_epoch) < sigma_anneal_epochs):
+            status_str = f"Weights: frame={current_frame_pos_weight:.2f}, onset={current_onset_pos_weight:.2f}"
+            if initial_sigma > 0:
+                status_str += f", sigma={current_sigma:.2f}"
+            print(status_str)
         
         train_losses.append(train_loss['total_loss'])
         val_losses.append(val_loss['total_loss'])
         train_metrics.append(train_metric)
         val_metrics.append(val_metric)
+        
+        # Log to TensorBoard
+        # Losses
+        writer.add_scalar('Loss/Train/Total', train_loss['total_loss'], epoch)
+        writer.add_scalar('Loss/Train/Onset', train_loss['onset_loss'], epoch)
+        writer.add_scalar('Loss/Train/Duration', train_loss['duration_loss'], epoch)
+        writer.add_scalar('Loss/Train/Frame', train_loss['frame_loss'], epoch)
+        
+        writer.add_scalar('Loss/Val/Total', val_loss['total_loss'], epoch)
+        writer.add_scalar('Loss/Val/Onset', val_loss['onset_loss'], epoch)
+        writer.add_scalar('Loss/Val/Duration', val_loss['duration_loss'], epoch)
+        writer.add_scalar('Loss/Val/Frame', val_loss['frame_loss'], epoch)
+        
+        # Metrics
+        writer.add_scalar('Metrics/Train/Onset_F1', train_metric['onset_f1'], epoch)
+        writer.add_scalar('Metrics/Train/Onset_Precision', train_metric['onset_precision'], epoch)
+        writer.add_scalar('Metrics/Train/Onset_Recall', train_metric['onset_recall'], epoch)
+        
+        writer.add_scalar('Metrics/Val/Onset_F1', val_metric['onset_f1'], epoch)
+        writer.add_scalar('Metrics/Val/Onset_Precision', val_metric['onset_precision'], epoch)
+        writer.add_scalar('Metrics/Val/Onset_Recall', val_metric['onset_recall'], epoch)
+        
+        # Parameters
+        writer.add_scalar('Params/Learning_Rate', optimizer.param_groups[0]['lr'], epoch)
+        writer.add_scalar('Params/PosWeight/Frame', current_frame_pos_weight, epoch)
+        writer.add_scalar('Params/PosWeight/Onset', current_onset_pos_weight, epoch)
+        if initial_sigma > 0:
+            writer.add_scalar('Params/Sigma', current_sigma, epoch)
         
         # Print stats
         print(f"Loss - Train: {train_loss['total_loss']:.4f}, Val: {val_loss['total_loss']:.4f}")
@@ -808,8 +936,23 @@ def train(data_dir, run_folder, config):
         if (epoch + 1) % 10 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
+            
+            # Log image to TensorBoard
+            try:
+                import matplotlib.image as mpimg
+                if os.path.exists(vis_path):
+                    img = mpimg.imread(vis_path)
+                    # matplotlib reads as (H, W, C), TensorBoard wants (C, H, W)
+                    # Also handle RGBA (4 channels) vs RGB (3 channels)
+                    if img.ndim == 3:
+                        img_tensor = torch.from_numpy(img).permute(2, 0, 1)
+                        writer.add_image('Predictions/Val', img_tensor, epoch)
+            except Exception as e:
+                print(f"Warning: Could not log image to TensorBoard: {e}")
         
         print()
+    
+    writer.close()
 
 
 if __name__ == "__main__":

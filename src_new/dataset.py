@@ -66,7 +66,7 @@ class PianoTranscriptionDataset(Dataset):
     def __init__(self, data_dir, snippet_frames, snippets_per_file=20, 
                  file_indices=None, file_list=None, seed=42, 
                  fixed_snippets=False, preload_into_ram=False,
-                 duration_mode='bins'):
+                 duration_mode='bins', clip_duration=True):
         """
         Args:
             data_dir: Directory containing .npz files
@@ -78,6 +78,7 @@ class PianoTranscriptionDataset(Dataset):
             fixed_snippets: If True, use fixed snippet positions
             preload_into_ram: If True, load all data into RAM
             duration_mode: 'bins' for classification, 'log' for log-duration regression, 'linear' for linear regression
+            clip_duration: If True, clip target durations to snippet boundaries
         """
         self.data_dir = data_dir
         self.snippet_frames = snippet_frames
@@ -85,6 +86,7 @@ class PianoTranscriptionDataset(Dataset):
         self.fixed_snippets = fixed_snippets
         self.preload_into_ram = preload_into_ram
         self.duration_mode = duration_mode
+        self.clip_duration = clip_duration
         
         # Get file list
         if file_list is not None and file_indices is not None:
@@ -175,6 +177,17 @@ class PianoTranscriptionDataset(Dataset):
             frame = frame[start_frame:end_frame, :]
             pedal = pedal[start_frame:end_frame, :]
         
+        # Clip duration to snippet boundaries if requested
+        if self.clip_duration:
+            # Create time indices [0, 1, ..., T-1]
+            time_indices = np.arange(self.snippet_frames).reshape(-1, 1) # (T, 1)
+            # Max duration in seconds (assuming 100 fps)
+            max_seconds_left = (self.snippet_frames - time_indices) / 100.0
+            
+            # Clip duration
+            duration = np.minimum(duration, max_seconds_left)
+            duration = np.maximum(duration, 0)
+
         # Process duration based on mode
         if self.duration_mode == 'bins':
             # Convert exact durations to bin indices for classification
