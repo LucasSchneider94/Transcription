@@ -30,6 +30,47 @@ from utils import (
 )
 
 
+def apply_gaussian_smoothing(targets, sigma):
+    """
+    Apply Gaussian smoothing to binary targets along time dimension.
+    Args:
+        targets: (Batch, Time, 88)
+        sigma: Standard deviation in frames
+    Returns:
+        Smoothed targets (Batch, Time, 88)
+    """
+    if sigma <= 0.1:
+        return targets
+        
+    B, T, K = targets.shape
+    
+    # Create kernel
+    kernel_size = int(6 * sigma) + 1
+    if kernel_size % 2 == 0: kernel_size += 1
+    
+    x = torch.arange(kernel_size, device=targets.device) - kernel_size // 2
+    kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+    # Normalize peak to 1.0 so onsets remain at 1.0 (soft labels)
+    kernel = kernel / kernel.max()
+    
+    kernel = kernel.view(1, 1, -1) # (Out, In, Time) -> (1, 1, K)
+    
+    # Reshape targets for conv1d: (B*K, 1, T)
+    targets_reshaped = targets.permute(0, 2, 1).reshape(B*K, 1, T)
+    
+    # Pad to maintain size
+    pad = kernel_size // 2
+    
+    # Conv1d
+    smoothed = F.conv1d(targets_reshaped, kernel, padding=pad)
+    
+    # Reshape back: (B*K, 1, T) -> (B, K, T) -> (B, T, K)
+    smoothed = smoothed.view(B, K, T).permute(0, 2, 1)
+    
+    # Clamp to [0, 1]
+    return torch.clamp(smoothed, 0, 1)
+
+
 class FocalLoss(nn.Module):
     """
     Focal Loss for addressing class imbalance in binary classification.
@@ -87,7 +128,7 @@ class FocalLoss(nn.Module):
         alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
         
         # Combine everything
-        loss = alpha_t * focal_weight * ce_loss
+        loss = ce_loss#alpha_t * focal_weight * ce_loss
         
         if self.reduction == 'mean':
             return loss.mean()
@@ -145,46 +186,6 @@ class OnsetDurationLoss(nn.Module):
         """Update sigma for Gaussian smoothing."""
         self.current_sigma = sigma
 
-    def apply_gaussian_smoothing(self, targets, sigma):
-        """
-        Apply Gaussian smoothing to binary targets along time dimension.
-        Args:
-            targets: (Batch, Time, 88)
-            sigma: Standard deviation in frames
-        Returns:
-            Smoothed targets (Batch, Time, 88)
-        """
-        if sigma <= 0.1:
-            return targets
-            
-        B, T, K = targets.shape
-        
-        # Create kernel
-        kernel_size = int(6 * sigma) + 1
-        if kernel_size % 2 == 0: kernel_size += 1
-        
-        x = torch.arange(kernel_size, device=targets.device) - kernel_size // 2
-        kernel = torch.exp(-0.5 * (x / sigma) ** 2)
-        # Normalize peak to 1.0 so onsets remain at 1.0 (soft labels)
-        kernel = kernel / kernel.max()
-        
-        kernel = kernel.view(1, 1, -1) # (Out, In, Time) -> (1, 1, K)
-        
-        # Reshape targets for conv1d: (B*K, 1, T)
-        targets_reshaped = targets.permute(0, 2, 1).reshape(B*K, 1, T)
-        
-        # Pad to maintain size
-        pad = kernel_size // 2
-        
-        # Conv1d
-        smoothed = F.conv1d(targets_reshaped, kernel, padding=pad)
-        
-        # Reshape back: (B*K, 1, T) -> (B, K, T) -> (B, T, K)
-        smoothed = smoothed.view(B, K, T).permute(0, 2, 1)
-        
-        # Clamp to [0, 1]
-        return torch.clamp(smoothed, 0, 1)
-    
     def forward(self, predictions, targets):
         """
         Args:
@@ -201,7 +202,7 @@ class OnsetDurationLoss(nn.Module):
         # Onset loss with optional smoothing
         onset_targets = targets['onset']
         if self.current_sigma > 0.1:
-            onset_targets = self.apply_gaussian_smoothing(onset_targets, self.current_sigma)
+            onset_targets = apply_gaussian_smoothing(onset_targets, self.current_sigma)
             
         onset_loss = self.onset_loss_fn(predictions['onset'], onset_targets)
         
@@ -500,27 +501,61 @@ def compute_frame_metrics(predictions, targets, threshold=0.5):
     }
 
 
-def compute_onset_metrics(pred_onset, target_onset, tolerance_frames=5, threshold=0.5):
+def compute_onset_metrics(pred_onset, target_onset, sigma=0.0, tolerance_frames=5, threshold=0.5):
     """
-    Compute note-level onset detection metrics with temporal tolerance.
-    An onset is correctly detected if it's within ±tolerance_frames of a ground truth onset
-    at the correct pitch.
+    Compute note-level onset detection metrics.
+    If sigma > 0.1, uses Soft F1 score with Gaussian smoothed targets (matching loss shape).
+    If sigma <= 0.1, uses standard Hard F1 with temporal tolerance.
     
     Args:
         pred_onset: (batch, time, 88) - onset predictions (logits or probabilities)
         target_onset: (batch, time, 88) - ground truth onsets (binary)
-        tolerance_frames: temporal tolerance window (±frames), default 5 = ±50ms at 100fps
-        threshold: prediction threshold for binarization
+        sigma: Sigma used for Gaussian smoothing (from loss config)
+        tolerance_frames: temporal tolerance window (only used if sigma <= 0.1)
+        threshold: prediction threshold (only used if sigma <= 0.1)
     
     Returns:
         dict with onset_precision, onset_recall, onset_f1, and counts (tp, fp, fn)
     """
     # Apply sigmoid if needed
     if pred_onset.min() < 0 or pred_onset.max() > 1:
-        pred_onset = torch.sigmoid(pred_onset)
-    
+        pred_probs = torch.sigmoid(pred_onset)
+    else:
+        pred_probs = pred_onset
+
+    # Soft F1 (matches shaped loss) - Requested by user
+    if sigma > 0.1:
+        # Smooth targets to match the loss shape
+        smoothed_targets = apply_gaussian_smoothing(target_onset, sigma)
+        
+        # Calculate Soft TP, FP, FN
+        # TP: Prediction * Target (Weighted by overlap)
+        tp = (pred_probs * smoothed_targets).sum().item()
+        
+        # FP: Prediction * (1 - Target)
+        # If target is 0.5 and pred is 1.0, this adds 0.5 to FP (partially wrong)
+        fp = (pred_probs * (1 - smoothed_targets)).sum().item()
+        
+        # FN: (1 - Prediction) * Target
+        # If target is 0.5 and pred is 0.0, this adds 0.5 to FN (partially missed)
+        fn = ((1 - pred_probs) * smoothed_targets).sum().item()
+        
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        return {
+            'onset_precision': precision,
+            'onset_recall': recall,
+            'onset_f1': f1,
+            'onset_tp': tp,
+            'onset_fp': fp,
+            'onset_fn': fn
+        }
+
+    # Hard F1 with tolerance (Legacy/Strict mode)
     # Binarize predictions
-    pred_binary = (pred_onset > threshold).float()
+    pred_binary = (pred_probs > threshold).float()
     
     # Initialize counters
     tp = 0  # True positives
@@ -594,29 +629,53 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     total_losses = {'onset_loss': 0, 'duration_loss': 0, 'frame_loss': 0, 'total_loss': 0}
     total_onset_metrics = {'onset_precision': 0, 'onset_recall': 0, 'onset_f1': 0}
     
+    # Initialize GradScaler for mixed precision
+    scaler = torch.amp.GradScaler(device=device.type, enabled=(device.type != 'cpu'))
+    
     pbar = tqdm(dataloader, desc="Training")
     for batch_idx, batch in enumerate(pbar):
         # Move data to device
-        spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
+        # Input is (Batch, n_mels, Time) - no unsqueeze needed for 1D Conv
+        spectrogram = batch['spectrogram'].to(device)
         onset = batch['onset'].to(device)
         duration = batch['duration'].to(device)
         frame = batch['frame'].to(device)
         
         # Forward pass
         optimizer.zero_grad()
-        predictions = model(spectrogram)
+        
+        # Print shapes only on the very first batch of the first epoch (if model supports it)
+        if batch_idx == 0 and hasattr(model, 'forward') and 'print_shapes' in model.forward.__code__.co_varnames:
+            if not getattr(model, 'has_printed_shapes', False):
+                print("\n" + "="*40)
+                print("MODEL LAYER DIMENSIONS (First Pass)")
+                print("="*40)
+                #with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
+                predictions = model(spectrogram, print_shapes=True)
+                model.has_printed_shapes = True
+                print("="*40 + "\n")
+            else:
+                #with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
+                predictions = model(spectrogram)
+        else:
+            #with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
+            predictions = model(spectrogram)
         
         # Compute loss
         targets = {'onset': onset, 'duration': duration, 'frame': frame}
+        #with torch.amp.autocast(device_type=device.type, dtype=torch.float32):
         loss, loss_dict = criterion(predictions, targets)
         
-        # Backward pass
-        loss.backward()
-        optimizer.step()
+        # Backward pass with scaler
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         
         # Compute onset metrics only
         with torch.no_grad():
-            onset_metrics = compute_onset_metrics(predictions['onset'], onset)
+            # Metrics computation usually done in float32
+            predictions['onset'] = predictions['onset'].float()
+            onset_metrics = compute_onset_metrics(predictions['onset'], onset, sigma=criterion.current_sigma)
         
         # Accumulate losses and metrics
         for key in total_losses:
@@ -649,7 +708,8 @@ def validate(model, dataloader, criterion, device):
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Validation"):
             # Move data to device
-            spectrogram = batch['spectrogram'].unsqueeze(1).to(device)
+            # Input is (Batch, n_mels, Time) - no unsqueeze needed for 1D Conv
+            spectrogram = batch['spectrogram'].to(device)
             onset = batch['onset'].to(device)
             duration = batch['duration'].to(device)
             frame = batch['frame'].to(device)
@@ -662,7 +722,7 @@ def validate(model, dataloader, criterion, device):
             loss, loss_dict = criterion(predictions, targets)
             
             # Compute onset metrics only
-            onset_metrics = compute_onset_metrics(predictions['onset'], onset)
+            onset_metrics = compute_onset_metrics(predictions['onset'], onset, sigma=criterion.current_sigma)
             
             # Accumulate losses and metrics
             for key in total_losses:
@@ -741,10 +801,12 @@ def train(data_dir, run_folder, config):
         duration_weight=config.get('duration_loss_weight', 2.0),
         frame_weight=config.get('frame_loss_weight', 1.0),
         duration_mode=config.get('duration_mode', 'log'),
-        frame_pos_weight=initial_frame_pos_weight,
-        onset_pos_weight=initial_onset_pos_weight,
+        frame_pos_weight=initial_frame_pos_weight,  # Pass calculated weights directly
+        onset_pos_weight=initial_onset_pos_weight,  # Pass calculated weights directly
         current_sigma=config.get('onset_tolerance_initial_sigma', 0.0)
     )
+    
+    # No need to call update_pos_weights here anymore as we passed them in __init__
     
     print(f"\nLoss weights:")
     print(f"  Onset: {config.get('onset_loss_weight', 4.0)}")
@@ -766,7 +828,7 @@ def train(data_dir, run_folder, config):
         print(f"  Annealing starts when F1 > {sigma_anneal_threshold}")
         print(f"  Annealing duration: {sigma_anneal_epochs} epochs")
     
-    optimizer = optim.Adam(
+    optimizer = optim.AdamW(
         model.parameters(),
         lr=config['learning_rate'],
         weight_decay=config.get('weight_decay', 1e-5)
@@ -933,7 +995,7 @@ def train(data_dir, run_folder, config):
         plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, curves_path)
         
         # Visualize predictions periodically
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 1 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
             

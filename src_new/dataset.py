@@ -202,7 +202,7 @@ class PianoTranscriptionDataset(Dataset):
             raise ValueError(f"Unknown duration_mode: {self.duration_mode}")
         
         return {
-            'spectrogram': torch.FloatTensor(spectrogram),
+            'spectrogram': torch.FloatTensor(spectrogram), # (n_mels, snippet_frames) -> (C, T)
             'onset': torch.FloatTensor(onset),
             'duration': torch.from_numpy(duration_processed),
             'frame': torch.FloatTensor(frame),

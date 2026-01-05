@@ -145,7 +145,8 @@ def run_inference(model, spectrogram, device, config):
     print(f"Running inference...")
     
     # Convert to tensor
-    spec_tensor = torch.FloatTensor(spectrogram).unsqueeze(0).unsqueeze(0).to(device)  # (1, 1, n_mels, time)
+    # Input shape for 1D model: (1, n_mels, time)
+    spec_tensor = torch.FloatTensor(spectrogram).unsqueeze(0).to(device)
     
     # Run inference
     with torch.no_grad():

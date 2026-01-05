@@ -20,40 +20,40 @@ CONFIG = {
     
     # Training parameters
     'snippet_bins': 256,                    # Snippet length in bins (2.56s at 100fps). Must be divisible by 64.
-    'batch_size': 8,                        # REDUCED for faster testing
-    'learning_rate': 1e-4,
+    'batch_size': 4,                        # REDUCED for faster testing
+    'learning_rate': 5e-5,
     'num_epochs': 500,                       # REDUCED for quick test
     'hidden_size': 256,                     # Legacy param, kept for compatibility
     'dropout': 0.2,
-    'weight_decay': 1e-4,
+    'weight_decay': 1e-7,
     
     # Multi-task loss weights (Simplified for U-Net)
-    'onset_loss_weight': 4.0,
-    'duration_loss_weight': 2.0,
+    'onset_loss_weight': 1.0,
+    'duration_loss_weight': 1.0,
     'frame_loss_weight': 1.0,
     
     # Smooth Loss parameters (NEW)
-    'onset_tolerance_initial_sigma': 3.0,           # Initial σ in bins (30ms at 100fps)
-    'onset_tolerance_final_sigma': 0.1,             # Final σ (nearly delta function)
+    'onset_tolerance_initial_sigma': 10.0,           # Initial σ in bins (30ms at 100fps)
+    'onset_tolerance_final_sigma': 0.01,             # Final σ (nearly delta function)
     'onset_tolerance_anneal_f1_threshold': 0.4,     # Start annealing when train F1 > this
     'onset_tolerance_anneal_epochs': 50,            # Anneal over N epochs
 
     # U-Net Architecture parameters (NEW)
     'use_unet': True,                               # Use U-Net architecture
-    'unet_encoder_channels': [64, 128, 256],        # Channel progression in encoder
+    'unet_encoder_channels': [352, 256, 256],        # Channel progression in encoder
     'unet_decoder_channels': [128, 64, 32],         # Channel progression in decoder
-    'unet_downsample_factor': 4,                    # Time reduction per layer (4^3 = 64 total)
+    'unet_downsample_factor': 2,                    # Time reduction per layer (4^3 = 64 total)
     'unet_num_layers': 3,                           # Number of encoder/decoder layers
     
     # Transformer parameters (Updated for bottleneck)
-    'transformer_dim': 512,                         # INCREASED from 256
-    'num_heads': 16,                                # INCREASED from 8
-    'num_layers': 8,                                # INCREASED from 4
+    'transformer_dim': 2048,                         # INCREASED from 256
+    'num_heads': 8,                                
+    'num_layers': 4,                                
     'transformer_ff_dim': 2048,                     # Explicit feedforward dim
     
     # Data augmentation settings
     'snippets_per_file': 50,                # REDUCED for faster testing
-    'data_fraction': 0.1,                     # REDUCED: Use 5% of dataset for quick test
+    'data_fraction': 1.0,                     # REDUCED: Use 5% of dataset for quick test
     'fixed_snippets': False,                # ONLY True for OVERFIT: Use FIXED snippets - see same data every epoch!
 
     # Model architecture
@@ -62,8 +62,8 @@ CONFIG = {
     # Learning rate scheduler settings
     'use_lr_scheduler': True,
     'scheduler_type': 'cosine_warmup',
-    'warmup_epochs': 5,                     # REDUCED for quick test
-    'scheduler_min_lr': 1e-6,
+    'warmup_epochs': 0,                     # REDUCED for quick test
+    'scheduler_min_lr': 1e-7,
     
     # DataLoader optimization settings
     'num_workers': 12,                       # Set to 0 for debugging/testing
