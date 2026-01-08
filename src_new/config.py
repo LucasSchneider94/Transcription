@@ -8,7 +8,7 @@ CONFIG = {
     
     # Data paths
     'data_dir': './processed_data_17_18',
-    'split_year_folder': "2018",
+    'split_year_folder': "2013",
     'maestro_json': './maestro-v3.0.0.json',  # Path to MAESTRO metadata for proper train/val/test split
     
     # Onset/Duration parameters (NEW)
@@ -20,19 +20,25 @@ CONFIG = {
     # Training parameters
     'snippet_duration': 3.0,
     'batch_size': 8,                        # REDUCED for faster testing
-    'learning_rate': 1e-4,
+    'learning_rate': 5e-5,
     'num_epochs': 500,                       # REDUCED for quick test
     'hidden_size': 256,
     'num_heads': 8,
     'num_layers': 4,
     'dropout': 0.2,
-    'weight_decay': 1e-4,
+    'weight_decay': 5e-7,
     
     # Multi-task loss weights (UPDATED for onset + duration)
     'onset_weight': 1.0,                   # INCREASED: Onset detection is the hardest task
     'duration_weight': 1.0,                 # DECREASED: Duration is masked (only at onsets), easier task
     'frame_weight': 1.0,                    # DECREASED: Frame is auxiliary, should not dominate
     'consistency_weight': 0.5,              # Temporal consistency loss weight
+    
+    # Gaussian onset smoothing (sigma annealing)
+    'initial_sigma': 5.0,                   # Initial Gaussian sigma (bins) - wide window
+    'final_sigma': 0.5,                     # Final Gaussian sigma (bins) - narrow window
+    'sigma_anneal_threshold': 0.5,          # Start annealing when onset F1 > this threshold
+    'sigma_anneal_epochs': 20,              # Duration of sigma annealing in epochs
     
     # Focal Loss parameters (for handling extreme class imbalance)
     'use_focal_loss': True,                 # Use Focal Loss instead of BCE
@@ -43,7 +49,7 @@ CONFIG = {
     
     # Data augmentation settings
     'snippets_per_file': 50,                # REDUCED for faster testing
-    'data_fraction': 0.1,                     # REDUCED: Use 5% of dataset for quick test
+    'data_fraction': 1.0,                     # REDUCED: Use 5% of dataset for quick test
     'fixed_snippets': False,                # ONLY True for OVERFIT: Use FIXED snippets - see same data every epoch!
 
     # Model architecture
@@ -53,7 +59,7 @@ CONFIG = {
     'use_lr_scheduler': True,
     'scheduler_type': 'cosine_warmup',
     'warmup_epochs': 5,                     # REDUCED for quick test
-    'scheduler_min_lr': 1e-6,
+    'scheduler_min_lr': 5e-7,
     
     # DataLoader optimization settings
     'num_workers': 12,                       # Set to 0 for debugging/testing

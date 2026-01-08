@@ -8,7 +8,7 @@ CONFIG_OVERFIT = {
     
     # Data paths
     'data_dir': './processed_data_17_18',
-    'split_year_folder': "2018",
+    'split_year_folder': "2013",
     'maestro_json': './maestro-v3.0.0.json',
     
     # Onset/Duration parameters
@@ -29,10 +29,16 @@ CONFIG_OVERFIT = {
     'weight_decay': 0.0,                    # OVERFIT: No regularization
     
     # Multi-task loss weights - REBALANCED for overfitting
-    'onset_weight': 5.0,                   # OVERFIT: Focus heavily on onsets
-    'duration_weight': 3.0,                 # OVERFIT: Standard weight
+    'onset_weight': 1.0,                   # OVERFIT: Focus heavily on onsets
+    'duration_weight': 1.0,                 # OVERFIT: Standard weight
     'frame_weight': 1.0,                    # OVERFIT: Low weight - don't let it dominate!
     'consistency_weight': 0.5,              # OVERFIT: Disable consistency loss
+    
+    # Gaussian onset smoothing (sigma annealing)
+    'initial_sigma': 5.0,                   # Initial Gaussian sigma (bins) - wide window
+    'final_sigma': 1.0,                     # Final Gaussian sigma (bins) - narrow window
+    'sigma_anneal_threshold': 0.4,          # Start annealing when onset F1 > this threshold
+    'sigma_anneal_epochs': 50,              # Duration of sigma annealing in epochs
     
     # Focal Loss parameters (CRITICAL for overfitting test)
     'use_focal_loss': True,                 # OVERFIT: Use Focal Loss to force onset detection

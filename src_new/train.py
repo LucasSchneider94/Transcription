@@ -29,6 +29,47 @@ from utils import (
 )
 
 
+def apply_gaussian_smoothing(targets, sigma):
+    """
+    Apply Gaussian smoothing to binary targets along time dimension.
+    Args:
+        targets: (Batch, Time, 88)
+        sigma: Standard deviation in frames
+    Returns:
+        Smoothed targets (Batch, Time, 88)
+    """
+    if sigma <= 0.1:
+        return targets
+        
+    B, T, K = targets.shape
+    
+    # Create kernel
+    kernel_size = int(6 * sigma) + 1
+    if kernel_size % 2 == 0: kernel_size += 1
+    
+    x = torch.arange(kernel_size, device=targets.device) - kernel_size // 2
+    kernel = torch.exp(-0.5 * (x / sigma) ** 2)
+    # Normalize peak to 1.0 so onsets remain at 1.0 (soft labels)
+    kernel = kernel / kernel.max()
+    
+    kernel = kernel.view(1, 1, -1) # (Out, In, Time) -> (1, 1, K)
+    
+    # Reshape targets for conv1d: (B*K, 1, T)
+    targets_reshaped = targets.permute(0, 2, 1).reshape(B*K, 1, T)
+    
+    # Pad to maintain size
+    pad = kernel_size // 2
+    
+    # Conv1d
+    smoothed = F.conv1d(targets_reshaped, kernel, padding=pad)
+    
+    # Reshape back: (B*K, 1, T) -> (B, K, T) -> (B, T, K)
+    smoothed = smoothed.view(B, K, T).permute(0, 2, 1)
+    
+    # Clamp to [0, 1]
+    return torch.clamp(smoothed, 0, 1)
+
+
 class FocalLoss(nn.Module):
     """
     Focal Loss for addressing class imbalance in binary classification.
@@ -99,43 +140,28 @@ class FocalLoss(nn.Module):
 class OnsetDurationLoss(nn.Module):
     """
     Multi-task loss for onset, duration, and frame prediction.
-    Supports pos_weight annealing for onset and frame losses.
+    Supports Gaussian smoothing for onset targets (sigma annealing).
     """
     def __init__(self, onset_weight=4.0, duration_weight=2.0, frame_weight=1.0, 
                  duration_mode='log',
-                 frame_pos_weight=1.0, onset_pos_weight=1.0):
+                 current_sigma=0.0):
         super(OnsetDurationLoss, self).__init__()
         self.onset_weight = onset_weight
         self.duration_weight = duration_weight
         self.frame_weight = frame_weight
         self.duration_mode = duration_mode
+        self.current_sigma = current_sigma
         
-        # Store pos_weights (will be updated each epoch)
-        self.frame_pos_weight = frame_pos_weight
-        self.onset_pos_weight = onset_pos_weight
-        
-        # Loss functions with pos_weight
-        self.onset_loss_fn = None
-        self.frame_loss_fn = None
-        self.update_pos_weights(frame_pos_weight, onset_pos_weight)
+        # BCE loss functions without pos_weight
+        self.onset_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
+        self.frame_loss_fn = nn.BCEWithLogitsLoss(reduction='mean')
         
         self.ce = nn.CrossEntropyLoss(reduction='none')
         self.mse = nn.MSELoss(reduction='none')
     
-    def update_pos_weights(self, frame_pos_weight, onset_pos_weight):
-        """Update pos_weights for onset and frame losses."""
-        self.frame_pos_weight = frame_pos_weight
-        self.onset_pos_weight = onset_pos_weight
-        
-        # Recreate loss functions with new pos_weights
-        self.frame_loss_fn = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor([frame_pos_weight]),
-            reduction='mean'
-        )
-        self.onset_loss_fn = nn.BCEWithLogitsLoss(
-            pos_weight=torch.tensor([onset_pos_weight]),
-            reduction='mean'
-        )
+    def update_sigma(self, sigma):
+        """Update sigma for Gaussian smoothing."""
+        self.current_sigma = sigma
     
     def forward(self, predictions, targets):
         """
@@ -146,12 +172,12 @@ class OnsetDurationLoss(nn.Module):
         Returns:
             Total weighted loss and individual losses
         """
-        # Move pos_weight tensors to correct device
-        self.frame_loss_fn.pos_weight = self.frame_loss_fn.pos_weight.to(predictions['frame'].device)
-        self.onset_loss_fn.pos_weight = self.onset_loss_fn.pos_weight.to(predictions['onset'].device)
-        
-        # Onset loss
-        onset_loss = self.onset_loss_fn(predictions['onset'], targets['onset'])
+        # Onset loss with optional smoothing
+        onset_targets = targets['onset']
+        if self.current_sigma > 0.1:
+            onset_targets = apply_gaussian_smoothing(onset_targets, self.current_sigma)
+            
+        onset_loss = self.onset_loss_fn(predictions['onset'], onset_targets)
         
         # Duration loss (masked)
         onset_mask = targets['onset'] > 0.5
@@ -680,8 +706,7 @@ def train(data_dir, run_folder, config):
         duration_weight=config.get('duration_weight', 2.0),
         frame_weight=config.get('frame_weight', 1.0),
         duration_mode=config.get('duration_mode', 'log'),
-        frame_pos_weight=initial_frame_pos_weight,
-        onset_pos_weight=initial_onset_pos_weight
+        current_sigma=config.get('initial_sigma', 0.0)  # ADD: pass initial_sigma
     )
     
     print(f"\nLoss weights:")
@@ -726,47 +751,53 @@ def train(data_dir, run_folder, config):
     # Save config to run folder
     save_config_to_run_folder(config, run_folder)
     
+    # Sigma annealing config
+    initial_sigma = config.get('initial_sigma', 5.0)
+    final_sigma = config.get('final_sigma', 0.5)
+    sigma_anneal_threshold = config.get('sigma_anneal_threshold', 0.4)
+    sigma_anneal_epochs = config.get('sigma_anneal_epochs', 50)
+    
+    print(f"\nGaussian Onset Smoothing enabled:")
+    print(f"  Initial sigma: {initial_sigma} bins")
+    print(f"  Final sigma: {final_sigma} bins")
+    print(f"  Annealing starts when F1 > {sigma_anneal_threshold}")
+    print(f"  Annealing duration: {sigma_anneal_epochs} epochs")
+    
     # Training loop
     print(f"\nStarting training from epoch {start_epoch + 1}\n")
     
-    # Adaptive annealing state
-    annealing_triggered = False
-    annealing_start_epoch = None
-    anneal_duration = 30
+    # Sigma annealing state
+    sigma_annealing_triggered = False
+    sigma_annealing_start_epoch = None
     
     for epoch in range(start_epoch, config['num_epochs']):
         print(f"Epoch {epoch + 1}/{config['num_epochs']}")
+        
+        # Update sigma for Gaussian smoothing
+        if not sigma_annealing_triggered:
+            current_sigma = initial_sigma
+        elif (epoch - sigma_annealing_start_epoch) < sigma_anneal_epochs:
+            # Linear annealing from initial_sigma to final_sigma
+            progress = (epoch - sigma_annealing_start_epoch) / sigma_anneal_epochs
+            current_sigma = initial_sigma + (final_sigma - initial_sigma) * progress
+        else:
+            current_sigma = final_sigma
+        
+        criterion.update_sigma(current_sigma)
         
         # Train and validate
         train_loss, train_metric = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_metric = validate(model, val_loader, criterion, device)
         
-        # Check if we should trigger annealing
-        if not annealing_triggered and train_metric['onset_f1'] >= 0.40:
-            annealing_triggered = True
-            annealing_start_epoch = epoch
-            print(f"✓ Train onset F1 reached 40%, starting pos_weight annealing over next {anneal_duration} epochs")
+        # Check if we should trigger sigma annealing
+        if not sigma_annealing_triggered and train_metric['onset_f1'] >= sigma_anneal_threshold:
+            sigma_annealing_triggered = True
+            sigma_annealing_start_epoch = epoch
+            print(f"✓ Onset F1 reached {sigma_anneal_threshold:.1f}, starting sigma annealing over {sigma_anneal_epochs} epochs")
         
-        # Update pos_weights with adaptive annealing schedule
-        if not annealing_triggered:
-            # Keep initial high weights
-            current_frame_pos_weight = initial_frame_pos_weight
-            current_onset_pos_weight = initial_onset_pos_weight
-        elif (epoch - annealing_start_epoch) < anneal_duration:
-            # Anneal to 1.0
-            progress = (epoch - annealing_start_epoch) / anneal_duration
-            current_frame_pos_weight = 1.0 + (initial_frame_pos_weight - 1.0) * (1.0 - progress)
-            current_onset_pos_weight = 1.0 + (initial_onset_pos_weight - 1.0) * (1.0 - progress)
-        else:
-            # Fixed at 1.0
-            current_frame_pos_weight = 1.0
-            current_onset_pos_weight = 1.0
-        
-        criterion.update_pos_weights(current_frame_pos_weight, current_onset_pos_weight)
-        
-        # Print pos_weights during annealing or at start
-        if epoch < 5 or (annealing_triggered and (epoch - annealing_start_epoch) < anneal_duration):
-            print(f"Pos_weights: frame={current_frame_pos_weight:.2f}, onset={current_onset_pos_weight:.2f}")
+        # Print sigma during annealing or at start
+        if epoch < 5 or (sigma_annealing_triggered and (epoch - sigma_annealing_start_epoch) < sigma_anneal_epochs):
+            print(f"Gaussian sigma: {current_sigma:.2f} bins")
         
         train_losses.append(train_loss['total_loss'])
         val_losses.append(val_loss['total_loss'])
@@ -805,7 +836,7 @@ def train(data_dir, run_folder, config):
         plot_training_curves(train_losses, val_losses, train_metrics, val_metrics, curves_path)
         
         # Visualize predictions periodically
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 1 == 0:
             vis_path = os.path.join(run_folder, f"predictions_epoch_{epoch + 1}.png")
             visualize_predictions(model, val_loader, device, vis_path)
         
