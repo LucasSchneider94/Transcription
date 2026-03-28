@@ -30,15 +30,15 @@ CONFIG = {
     
     # Multi-task loss weights (UPDATED for onset + duration)
     'onset_weight': 1.0,                   # INCREASED: Onset detection is the hardest task
-    'duration_weight': 1.0,                 # DECREASED: Duration is masked (only at onsets), easier task
+    'duration_weight': 5.0,                 # INCREASED: Need to learn durations better
     'frame_weight': 1.0,                    # DECREASED: Frame is auxiliary, should not dominate
     'consistency_weight': 0.5,              # Temporal consistency loss weight
     
     # Gaussian onset smoothing (sigma annealing)
-    'initial_sigma': 5.0,                   # Initial Gaussian sigma (bins) - wide window
-    'final_sigma': 0.5,                     # Final Gaussian sigma (bins) - narrow window
-    'sigma_anneal_threshold': 0.5,          # Start annealing when onset F1 > this threshold
-    'sigma_anneal_epochs': 20,              # Duration of sigma annealing in epochs
+    'initial_sigma': 1.5,                   # Fixed Gaussian sigma (bins) - no annealing
+    'final_sigma': 1.5,                     # Fixed Gaussian sigma (bins) - no annealing
+    'sigma_anneal_threshold': 0.4,          # Start annealing when onset F1 > this threshold
+    'sigma_anneal_epochs': 50,              # Duration of sigma annealing in epochs
     
     # Focal Loss parameters (for handling extreme class imbalance)
     'use_focal_loss': True,                 # Use Focal Loss instead of BCE

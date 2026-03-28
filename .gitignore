@@ -185,3 +185,12 @@ cython_debug/
 *.npy
 *.npz
 *.png
+
+# Node / Next.js
+node_modules/
+.next/
+.vercel/
+src_new/frontend/webapp/.env*.local
+
+# frontend
+src_new/frontend/webapp/node_modules/

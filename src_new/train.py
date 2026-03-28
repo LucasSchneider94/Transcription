@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 import os
 import json
@@ -751,6 +752,9 @@ def train(data_dir, run_folder, config):
     # Save config to run folder
     save_config_to_run_folder(config, run_folder)
     
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=run_folder)
+    
     # Sigma annealing config
     initial_sigma = config.get('initial_sigma', 5.0)
     final_sigma = config.get('final_sigma', 0.5)
@@ -803,6 +807,25 @@ def train(data_dir, run_folder, config):
         val_losses.append(val_loss['total_loss'])
         train_metrics.append(train_metric)
         val_metrics.append(val_metric)
+        
+        # Log to TensorBoard
+        writer.add_scalar('Loss/train_total', train_loss['total_loss'], epoch)
+        writer.add_scalar('Loss/train_onset', train_loss['onset_loss'], epoch)
+        writer.add_scalar('Loss/train_duration', train_loss['duration_loss'], epoch)
+        writer.add_scalar('Loss/train_frame', train_loss['frame_loss'], epoch)
+        writer.add_scalar('Loss/val_total', val_loss['total_loss'], epoch)
+        writer.add_scalar('Loss/val_onset', val_loss['onset_loss'], epoch)
+        writer.add_scalar('Loss/val_duration', val_loss['duration_loss'], epoch)
+        writer.add_scalar('Loss/val_frame', val_loss['frame_loss'], epoch)
+        writer.add_scalar('Metrics/train_onset_f1', train_metric['onset_f1'], epoch)
+        writer.add_scalar('Metrics/train_onset_precision', train_metric['onset_precision'], epoch)
+        writer.add_scalar('Metrics/train_onset_recall', train_metric['onset_recall'], epoch)
+        writer.add_scalar('Metrics/val_onset_f1', val_metric['onset_f1'], epoch)
+        writer.add_scalar('Metrics/val_onset_precision', val_metric['onset_precision'], epoch)
+        writer.add_scalar('Metrics/val_onset_recall', val_metric['onset_recall'], epoch)
+        writer.add_scalar('Hyperparams/sigma', current_sigma, epoch)
+        if scheduler is not None:
+            writer.add_scalar('Hyperparams/learning_rate', optimizer.param_groups[0]['lr'], epoch)
         
         # Print stats
         print(f"Loss - Train: {train_loss['total_loss']:.4f}, Val: {val_loss['total_loss']:.4f}")

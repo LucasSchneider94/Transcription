@@ -188,98 +188,122 @@ def visualize_comparison(ground_truth, predictions, save_path, start_time, end_t
     duration = end_time - start_time
     
     if ground_truth is not None:
-        # Plot ground truth and predictions side by side - 2x2 grid
-        fig, axes = plt.subplots(2, 2, figsize=(18, 10))
+        # Plot ground truth and predictions side by side - 2x3 grid
+        fig, axes = plt.subplots(2, 3, figsize=(20, 10))
         
         # Ground truth
-        # Panel 1: Onset + Duration
-        gt_onset = ground_truth['onset']
-        gt_duration = ground_truth['duration']
-        duration_binned = np.zeros_like(gt_duration)
-        for i in range(NUM_DURATION_BINS):
-            mask = (gt_duration >= DURATION_BINS[i]) & (gt_duration < DURATION_BINS[i+1])
-            duration_binned[mask] = i
-        onset_duration_combined = duration_binned.astype(float).copy()
-        onset_duration_combined[gt_onset == 0] = 0
-        onset_duration_combined[gt_onset == 1] = duration_binned[gt_onset == 1] + 1
-        
-        im1 = axes[0, 0].imshow(onset_duration_combined.T, aspect='auto', origin='lower', 
-                                cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
-        axes[0, 0].set_title(f'Ground Truth: Onsets + Duration', fontsize=14, fontweight='bold')
+        # Panel 1: Onset predictions
+        im1 = axes[0, 0].imshow(ground_truth['onset'].T, aspect='auto', origin='lower', 
+                                cmap='hot', interpolation='none', vmin=0, vmax=1)
+        axes[0, 0].set_title(f'Ground Truth: Onsets', fontsize=14, fontweight='bold')
         axes[0, 0].set_ylabel('Piano Keys (88)', fontsize=11)
-        cbar1 = plt.colorbar(im1, ax=axes[0, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
-        tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
-        cbar1.ax.set_yticklabels(tick_labels, fontsize=8)
+        plt.colorbar(im1, ax=axes[0, 0])
         
-        # Panel 2: Frame (FIXED: Added vmin=0, vmax=1)
-        im_frame_gt = axes[0, 1].imshow(ground_truth['frame'].T, aspect='auto', origin='lower', 
-                                         cmap='hot', interpolation='nearest', vmin=0, vmax=1)
-        axes[0, 1].set_title(f'Ground Truth: Frame (Active Notes)', fontsize=14, fontweight='bold')
-        axes[0, 1].set_ylabel('Piano Keys (88)', fontsize=11)
-        plt.colorbar(im_frame_gt, ax=axes[0, 1])
-        
-        # Predictions
-        # Panel 3: Onset + Duration
-        pred_onset = predictions['onset']
-        pred_duration = predictions['duration']
-        pred_duration_binned = np.zeros_like(pred_duration)
+        # Panel 2: Duration (colored by bin, -1 for no onset)
+        gt_duration = ground_truth['duration']
+        gt_onset = ground_truth['onset']
+        duration_viz = np.full_like(gt_duration, -1.0)  # -1 = no onset
         for i in range(NUM_DURATION_BINS):
-            mask = (pred_duration >= DURATION_BINS[i]) & (pred_duration < DURATION_BINS[i+1])
-            pred_duration_binned[mask] = i
-        pred_onset_duration_combined = pred_duration_binned.astype(float).copy()
-        pred_onset_duration_combined[pred_onset < 0.5] = 0
-        pred_onset_duration_combined[pred_onset >= 0.5] = pred_duration_binned[pred_onset >= 0.5] + 1
+            mask = (gt_duration >= DURATION_BINS[i]) & (gt_duration < DURATION_BINS[i+1]) & (gt_onset > 0.5)
+            duration_viz[mask] = i
         
-        im2 = axes[1, 0].imshow(pred_onset_duration_combined.T, aspect='auto', origin='lower', 
-                                cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
-        axes[1, 0].set_title(f'Predicted: Onsets + Duration', fontsize=14, fontweight='bold')
-        axes[1, 0].set_ylabel('Piano Keys (88)', fontsize=11)
-        axes[1, 0].set_xlabel('Time Frames', fontsize=11)
-        cbar2 = plt.colorbar(im2, ax=axes[1, 0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
+        # Use custom colormap: black for -1, viridis for 0-7
+        from matplotlib.colors import ListedColormap
+        colors = ['black'] + plt.cm.viridis(np.linspace(0, 1, NUM_DURATION_BINS)).tolist()
+        cmap_duration = ListedColormap(colors)
+        
+        im2 = axes[0, 1].imshow(duration_viz.T, aspect='auto', origin='lower', 
+                                cmap=cmap_duration, interpolation='none', vmin=-1, vmax=NUM_DURATION_BINS-1)
+        axes[0, 1].set_title(f'Ground Truth: Duration', fontsize=14, fontweight='bold')
+        axes[0, 1].set_ylabel('Piano Keys (88)', fontsize=11)
+        cbar2 = plt.colorbar(im2, ax=axes[0, 1], ticks=[-1] + list(range(NUM_DURATION_BINS)))
+        tick_labels = ['No Onset'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
         cbar2.ax.set_yticklabels(tick_labels, fontsize=8)
         
-        # Panel 4: Frame (FIXED: Added vmin=0, vmax=1)
-        im_frame_pred = axes[1, 1].imshow(predictions['frame'].T, aspect='auto', origin='lower', 
-                                           cmap='hot', interpolation='nearest', vmin=0, vmax=1)
-        axes[1, 1].set_title(f'Predicted: Frame (Active Notes)', fontsize=14, fontweight='bold')
+        # Panel 3: Frame
+        im3 = axes[0, 2].imshow(ground_truth['frame'].T, aspect='auto', origin='lower', 
+                                cmap='hot', interpolation='none', vmin=0, vmax=1)
+        axes[0, 2].set_title(f'Ground Truth: Frame', fontsize=14, fontweight='bold')
+        axes[0, 2].set_ylabel('Piano Keys (88)', fontsize=11)
+        plt.colorbar(im3, ax=axes[0, 2])
+        
+        # Predictions
+        # Panel 4: Onset predictions
+        im4 = axes[1, 0].imshow(predictions['onset'].T, aspect='auto', origin='lower', 
+                                cmap='hot', interpolation='none', vmin=0, vmax=1)
+        axes[1, 0].set_title(f'Predicted: Onsets', fontsize=14, fontweight='bold')
+        axes[1, 0].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[1, 0].set_xlabel('Time Frames', fontsize=11)
+        plt.colorbar(im4, ax=axes[1, 0])
+        
+        # Panel 5: Duration (colored by bin, -1 for no onset)
+        pred_duration = predictions['duration']
+        pred_onset = predictions['onset']
+        pred_duration_viz = np.full_like(pred_duration, -1.0)  # -1 = no onset
+        for i in range(NUM_DURATION_BINS):
+            mask = (pred_duration >= DURATION_BINS[i]) & (pred_duration < DURATION_BINS[i+1]) & (pred_onset >= 0.5)
+            pred_duration_viz[mask] = i
+        
+        im5 = axes[1, 1].imshow(pred_duration_viz.T, aspect='auto', origin='lower', 
+                                cmap=cmap_duration, interpolation='none', vmin=-1, vmax=NUM_DURATION_BINS-1)
+        axes[1, 1].set_title(f'Predicted: Duration', fontsize=14, fontweight='bold')
         axes[1, 1].set_ylabel('Piano Keys (88)', fontsize=11)
         axes[1, 1].set_xlabel('Time Frames', fontsize=11)
-        plt.colorbar(im_frame_pred, ax=axes[1, 1])
+        cbar5 = plt.colorbar(im5, ax=axes[1, 1], ticks=[-1] + list(range(NUM_DURATION_BINS)))
+        cbar5.ax.set_yticklabels(tick_labels, fontsize=8)
+        
+        # Panel 6: Frame
+        im6 = axes[1, 2].imshow(predictions['frame'].T, aspect='auto', origin='lower', 
+                                cmap='hot', interpolation='none', vmin=0, vmax=1)
+        axes[1, 2].set_title(f'Predicted: Frame', fontsize=14, fontweight='bold')
+        axes[1, 2].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[1, 2].set_xlabel('Time Frames', fontsize=11)
+        plt.colorbar(im6, ax=axes[1, 2])
         
     else:
-        # Plot only predictions
-        fig, axes = plt.subplots(1, 2, figsize=(18, 5))
+        # Plot only predictions - 1x3 grid
+        fig, axes = plt.subplots(1, 3, figsize=(20, 5))
         
-        # Panel 1: Onset + Duration
-        pred_onset = predictions['onset']
-        pred_duration = predictions['duration']
-        pred_duration_binned = np.zeros_like(pred_duration)
-        for i in range(NUM_DURATION_BINS):
-            mask = (pred_duration >= DURATION_BINS[i]) & (pred_duration < DURATION_BINS[i+1])
-            pred_duration_binned[mask] = i
-        pred_onset_duration_combined = pred_duration_binned.astype(float).copy()
-        pred_onset_duration_combined[pred_onset < 0.5] = 0
-        pred_onset_duration_combined[pred_onset >= 0.5] = pred_duration_binned[pred_onset >= 0.5] + 1
-        
-        im = axes[0].imshow(pred_onset_duration_combined.T, aspect='auto', origin='lower', 
-                           cmap='hot', interpolation='nearest', vmin=0, vmax=NUM_DURATION_BINS+1)
-        axes[0].set_title(f'Predicted: Onsets + Duration', fontsize=14, fontweight='bold')
+        # Panel 1: Onset predictions
+        im1 = axes[0].imshow(predictions['onset'].T, aspect='auto', origin='lower', 
+                            cmap='hot', interpolation='none', vmin=0, vmax=1)
+        axes[0].set_title(f'Predicted: Onsets', fontsize=14, fontweight='bold')
         axes[0].set_ylabel('Piano Keys (88)', fontsize=11)
         axes[0].set_xlabel('Time Frames', fontsize=11)
-        cbar = plt.colorbar(im, ax=axes[0], ticks=[0] + list(range(1, NUM_DURATION_BINS+1)))
-        tick_labels = ['Silence'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
-        cbar.ax.set_yticklabels(tick_labels, fontsize=8)
+        plt.colorbar(im1, ax=axes[0])
         
-        # Panel 2: Frame (FIXED: Added vmin=0, vmax=1)
-        im_frame = axes[1].imshow(predictions['frame'].T, aspect='auto', origin='lower', 
-                                   cmap='hot', interpolation='nearest', vmin=0, vmax=1)
-        axes[1].set_title(f'Predicted: Frame (Active Notes)', fontsize=14, fontweight='bold')
+        # Panel 2: Duration (colored by bin, -1 for no onset)
+        pred_duration = predictions['duration']
+        pred_onset = predictions['onset']
+        pred_duration_viz = np.full_like(pred_duration, -1.0)  # -1 = no onset
+        for i in range(NUM_DURATION_BINS):
+            mask = (pred_duration >= DURATION_BINS[i]) & (pred_duration < DURATION_BINS[i+1]) & (pred_onset >= 0.5)
+            pred_duration_viz[mask] = i
+        
+        # Use custom colormap: black for -1, viridis for 0-7
+        from matplotlib.colors import ListedColormap
+        colors = ['black'] + plt.cm.viridis(np.linspace(0, 1, NUM_DURATION_BINS)).tolist()
+        cmap_duration = ListedColormap(colors)
+        
+        im2 = axes[1].imshow(pred_duration_viz.T, aspect='auto', origin='lower', 
+                            cmap=cmap_duration, interpolation='none', vmin=-1, vmax=NUM_DURATION_BINS-1)
+        axes[1].set_title(f'Predicted: Duration', fontsize=14, fontweight='bold')
         axes[1].set_ylabel('Piano Keys (88)', fontsize=11)
         axes[1].set_xlabel('Time Frames', fontsize=11)
-        plt.colorbar(im_frame, ax=axes[1])
+        cbar2 = plt.colorbar(im2, ax=axes[1], ticks=[-1] + list(range(NUM_DURATION_BINS)))
+        tick_labels = ['No Onset'] + [get_duration_bin_label(i) for i in range(NUM_DURATION_BINS)]
+        cbar2.ax.set_yticklabels(tick_labels, fontsize=8)
+        
+        # Panel 3: Frame
+        im3 = axes[2].imshow(predictions['frame'].T, aspect='auto', origin='lower', 
+                            cmap='hot', interpolation='none', vmin=0, vmax=1)
+        axes[2].set_title(f'Predicted: Frame', fontsize=14, fontweight='bold')
+        axes[2].set_ylabel('Piano Keys (88)', fontsize=11)
+        axes[2].set_xlabel('Time Frames', fontsize=11)
+        plt.colorbar(im3, ax=axes[2])
     
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
+    plt.savefig(save_path, dpi=300)
     plt.close()
     print(f"✓ Visualization saved to {save_path}")
 

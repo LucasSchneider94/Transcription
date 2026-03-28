@@ -30,13 +30,13 @@ CONFIG_OVERFIT = {
     
     # Multi-task loss weights - REBALANCED for overfitting
     'onset_weight': 1.0,                   # OVERFIT: Focus heavily on onsets
-    'duration_weight': 1.0,                 # OVERFIT: Standard weight
+    'duration_weight': 5.0,                 # OVERFIT: Need to learn durations better
     'frame_weight': 1.0,                    # OVERFIT: Low weight - don't let it dominate!
     'consistency_weight': 0.5,              # OVERFIT: Disable consistency loss
     
     # Gaussian onset smoothing (sigma annealing)
-    'initial_sigma': 5.0,                   # Initial Gaussian sigma (bins) - wide window
-    'final_sigma': 1.0,                     # Final Gaussian sigma (bins) - narrow window
+    'initial_sigma': 1.5,                   # Fixed Gaussian sigma (bins) - no annealing
+    'final_sigma': 1.5,                     # Fixed Gaussian sigma (bins) - no annealing
     'sigma_anneal_threshold': 0.4,          # Start annealing when onset F1 > this threshold
     'sigma_anneal_epochs': 50,              # Duration of sigma annealing in epochs
     
