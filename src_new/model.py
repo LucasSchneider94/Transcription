@@ -1,385 +1,269 @@
+"""Piano Transcription Model: Asymmetric Separable CNN + Temporal Transformer
+
+Architecture:
+  CNNEncoder          — Three ConvBlocks with elongated frequency-axis kernels that
+                        span harmonic/overtone structure across many mel bins, paired
+                        with moderate time-axis kernels for local dynamics.  Average-
+                        pooling between blocks progressively reduces the frequency
+                        dimension.  For n_mels=352 (=88×4) the default pool schedule
+                        (×4, ×2, ×4) yields a flat dim of 128 × 11 = 1 408 which is
+                        projected to transformer_dim.
+  TemporalTransformer — Pre-norm Transformer encoder over the time axis.  Self-
+                        attention gives every frame access to every other frame,
+                        enabling global temporal context at modest cost (sequences
+                        are only a few hundred frames long).
+  Two linear heads    — onset (sparse, fired at note-attack) and frame (dense,
+                        active throughout acoustic duration).  Both output raw
+                        logits over 88 piano keys × T time frames.
+"""
+
+import math
+
 import torch
 import torch.nn as nn
-import math
 import torch.nn.functional as F
+
 from config import CONFIG
 
-class ConvolutionalFeatureExtractorLegacy(nn.Module):
-    """
-    LEGACY: Old CNN architecture for loading checkpoints from training_run_001-008.
-    Use this for inference on old models.
-    """
-    def __init__(self, n_mels, hidden_size):
-        super(ConvolutionalFeatureExtractorLegacy, self).__init__()
-        
-        self.conv_layers = nn.Sequential(
-            # First conv block - OLD SIZE
-            nn.Conv2d(1, 32, kernel_size=(3, 3), padding=(1, 1)),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            # Second conv block - OLD SIZE
-            nn.Conv2d(32, 64, kernel_size=(3, 3), padding=(1, 1)),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            # Third conv block - OLD SIZE
-            nn.Conv2d(64, 128, kernel_size=(3, 3), padding=(1, 1)),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-        )
-        
-        # Calculate output feature size after conv layers
-        self.feature_size = 128 * (n_mels // 8)  # After 3 pooling layers
-        self.projection = nn.Linear(self.feature_size, hidden_size)
-        
-    def forward(self, x):
-        # x shape: (batch_size, 1, n_mels, time_frames)
-        x = self.conv_layers(x)  # (batch_size, 128, n_mels//8, time_frames)
-        
-        # Reshape: (batch_size, time_frames, 128 * n_mels//8)
-        batch_size, channels, freq, time = x.size()
-        x = x.permute(0, 3, 1, 2).contiguous()
-        x = x.view(batch_size, time, -1)
-        
-        # Project to hidden_size
-        x = self.projection(x)
-        return x
 
 
-class ConvolutionalFeatureExtractor(nn.Module):
+# ---------------------------------------------------------------------------
+# Building blocks
+# ---------------------------------------------------------------------------
+
+class ConvBlock(nn.Module):
+    """Separable frequency-then-time convolution block with residual connection.
+
+    Applies a tall frequency-axis kernel first — to capture harmonic/overtone
+    relationships that span many mel bins — then a wide time-axis kernel for
+    local temporal dynamics.  A 1×1 shortcut allows gradients to flow freely
+    and lets the block learn residual corrections rather than full mappings.
     """
-    Convolutional layers to extract local features from spectrograms.
-    Increased capacity for better feature learning.
-    """
-    def __init__(self, n_mels, hidden_size):
-        super(ConvolutionalFeatureExtractor, self).__init__()
-        
-        self.conv_layers = nn.Sequential(
-            # First conv block - INCREASED channels
-            nn.Conv2d(1, 64, kernel_size=(3, 3), padding=(1, 1)),  # 32 → 64
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            # Second conv block - INCREASED channels
-            nn.Conv2d(64, 128, kernel_size=(3, 3), padding=(1, 1)),  # 64 → 128
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            # Third conv block - INCREASED channels
-            nn.Conv2d(128, 256, kernel_size=(3, 3), padding=(1, 1)),  # 128 → 256
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
-            
-            # NEW: Fourth conv block for more depth
-            nn.Conv2d(256, 256, kernel_size=(3, 3), padding=(1, 1)),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.MaxPool2d(kernel_size=(2, 1), stride=(2, 1)),
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        freq_kernel: int,
+        time_kernel: int,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        assert freq_kernel % 2 == 1, "freq_kernel must be odd (same-padding)"
+        assert time_kernel % 2 == 1, "time_kernel must be odd (same-padding)"
+
+        self.freq_conv = nn.Conv2d(
+            in_channels, out_channels, (freq_kernel, 1),
+            padding=(freq_kernel // 2, 0), bias=False,
         )
-        
-        # Calculate output feature size after conv layers
-        self.feature_size = 256 * (n_mels // 16)  # After 4 pooling layers (was // 8)
-        self.projection = nn.Linear(self.feature_size, hidden_size)
-        
-    def forward(self, x):
-        # x shape: (batch_size, 1, n_mels, time_frames)
-        x = self.conv_layers(x)  # (batch_size, 256, n_mels//16, time_frames)
-        
-        # Reshape: (batch_size, time_frames, 256 * n_mels//16)
-        batch_size, channels, freq, time = x.size()
-        x = x.permute(0, 3, 1, 2).contiguous()
-        x = x.view(batch_size, time, -1)
-        
-        # Project to hidden_size
-        x = self.projection(x)
-        return x
+        self.freq_norm = nn.GroupNorm(min(8, out_channels), out_channels)
+
+        self.time_conv = nn.Conv2d(
+            out_channels, out_channels, (1, time_kernel),
+            padding=(0, time_kernel // 2), bias=False,
+        )
+        self.time_norm = nn.GroupNorm(min(8, out_channels), out_channels)
+
+        self.residual_proj = (
+            nn.Conv2d(in_channels, out_channels, 1, bias=False)
+            if in_channels != out_channels
+            else nn.Identity()
+        )
+
+        self.drop = nn.Dropout2d(p=dropout) if dropout > 0.0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = self.residual_proj(x)
+        x = F.gelu(self.freq_norm(self.freq_conv(x)))
+        x = self.drop(F.gelu(self.time_norm(self.time_conv(x))))
+        return x + identity
+
+
+class CNNEncoder(nn.Module):
+    """Multi-stage separable CNN.
+
+    Input:  (B, 1, F, T)   — F = n_mels (default 352 = 88 × 4)
+    Output: (B, T, D)
+
+    Each stage applies a ConvBlock (freq then time conv) then averages over a
+    small frequency window.  The default schedule (pool ×4, ×2, ×4) brings
+    352 freq bins down to 11, giving a flat dim of 128 × 11 = 1 408 before the
+    linear projection to transformer_dim.
+
+    The frequency kernels grow smaller at each stage (87 → 31 → 15) because
+    the effective receptive field grows through the pooling chain.
+    """
+
+    def __init__(
+        self,
+        n_mels: int = 352,
+        channels: tuple = (32, 64, 128),
+        freq_kernels: tuple = (87, 31, 15),
+        time_kernel: int = 9,
+        freq_pool: tuple = (4, 2, 4),
+        transformer_dim: int = 256,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        assert len(channels) == len(freq_kernels) == len(freq_pool)
+        total_pool = 1
+        for p in freq_pool:
+            total_pool *= p
+        assert n_mels % total_pool == 0, (
+            f"n_mels={n_mels} must be divisible by cumulative freq-pool factor {total_pool}"
+        )
+
+        in_c = 1
+        self.blocks = nn.ModuleList()
+        self.pools = nn.ModuleList()
+        for out_c, fk, pool in zip(channels, freq_kernels, freq_pool):
+            self.blocks.append(ConvBlock(in_c, out_c, fk, time_kernel, dropout))
+            self.pools.append(nn.AvgPool2d((pool, 1)))
+            in_c = out_c
+
+        flat_dim = channels[-1] * (n_mels // total_pool)
+        self.project = nn.Sequential(
+            nn.Linear(flat_dim, transformer_dim, bias=False),
+            nn.LayerNorm(transformer_dim),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for block, pool in zip(self.blocks, self.pools):
+            x = pool(block(x))                              # (B, Ci, Fi, T)
+        B, C, F_out, T = x.shape
+        x = x.permute(0, 3, 1, 2).reshape(B, T, C * F_out)  # (B, T, C×F')
+        return self.project(x)                              # (B, T, D)
 
 
 class PositionalEncoding(nn.Module):
-    """
-    Positional encoding for transformer to capture temporal position information.
-    """
-    def __init__(self, hidden_size, max_len=5000, dropout=0.1):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        
-        # Create positional encoding
-        pe = torch.zeros(max_len, hidden_size)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, hidden_size, 2).float() * (-math.log(10000.0) / hidden_size))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # (1, max_len, hidden_size)
-        self.register_buffer('pe', pe)
-        
-    def forward(self, x):
-        # x shape: (batch_size, seq_len, hidden_size)
-        x = x + self.pe[:, :x.size(1), :]
-        return self.dropout(x)
+    """Standard sinusoidal positional encoding."""
 
-
-class PianoTranscriptionModelLegacy(nn.Module):
-    """
-    LEGACY: Model for loading old checkpoints (training_run_001-008).
-    Uses old CNN architecture (32→64→128, 3 layers).
-    """
-    def __init__(self, n_mels=128, hidden_size=256, num_heads=8, num_layers=4, 
-                 num_outputs=91, dropout=0.1):
-        super(PianoTranscriptionModelLegacy, self).__init__()
-        
-        # OLD Convolutional feature extractor
-        self.feature_extractor = ConvolutionalFeatureExtractorLegacy(n_mels, hidden_size)
-        
-        # Positional encoding
-        self.pos_encoder = PositionalEncoding(hidden_size, dropout=dropout)
-        
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=hidden_size,
-            nhead=num_heads,
-            dim_feedforward=hidden_size * 4,
-            dropout=dropout,
-            batch_first=True
+    def __init__(self, d_model: int, max_len: int = 8000, dropout: float = 0.1):
+        super().__init__()
+        self.drop = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float) * (-math.log(10000.0) / d_model)
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Output projection
-        self.output_projection = nn.Linear(hidden_size, num_outputs)
-        
-    def forward(self, x):
-        """Forward pass."""
-        x = self.feature_extractor(x)
-        x = self.pos_encoder(x)
-        x = self.transformer(x)
-        x = self.output_projection(x)
-        x = torch.sigmoid(x)
-        return x
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
 
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.drop(x + self.pe[:, : x.size(1)])
+
+
+class TemporalTransformer(nn.Module):
+    """Pre-norm Transformer encoder over the time axis.
+
+    Input:  (B, T, D)
+    Output: (B, T, D)
+
+    norm_first=True (pre-norm) is used throughout — it gives more stable
+    gradients and generally converges faster than post-norm at moderate scale.
+    """
+
+    def __init__(self, d_model: int, num_heads: int, num_layers: int, dropout: float = 0.1):
+        super().__init__()
+        self.pos_enc = PositionalEncoding(d_model, dropout=dropout)
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(layer, num_layers=num_layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.encoder(self.pos_enc(x))
+
+
+# ---------------------------------------------------------------------------
+# Full model
+# ---------------------------------------------------------------------------
 
 class PianoTranscriptionModel(nn.Module):
+    """Separable CNN + Temporal Transformer for piano transcription.
+
+    Predicts per-key logits for:
+      onset — sparse, fired at note-attack frames
+      frame — dense, active throughout acoustic note duration (incl. pedal)
     """
-    Piano transcription model with CNN-Transformer architecture.
-    Outputs two heads: onset and duration predictions.
-    Duration can be either classification (bins) or regression (log/linear).
-    """
-    def __init__(self, 
-                 input_features=CONFIG['n_mels'],
-                 num_keys=CONFIG['num_keys'],
-                 cnn_channels=[32, 64, 128],
-                 transformer_dim=256,
-                 num_heads=8,
-                 num_layers=6,
-                 dropout=0.1,
-                 duration_mode='bins',
-                 num_duration_bins=8):
-        super(PianoTranscriptionModel, self).__init__()
-        
-        self.duration_mode = duration_mode
-        self.num_duration_bins = num_duration_bins
-        
-        # Convolutional feature extractor
-        self.feature_extractor = ConvolutionalFeatureExtractor(input_features, transformer_dim)
-        
-        # Positional encoding
-        self.pos_encoder = PositionalEncoding(transformer_dim, dropout=dropout)
-        
-        # Transformer encoder layers
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=transformer_dim,
-            nhead=num_heads,
-            dim_feedforward=transformer_dim * 4,
+
+    def __init__(
+        self,
+        n_mels: int = CONFIG["n_mels"],
+        num_keys: int = CONFIG["num_keys"],
+        cnn_channels: tuple = (32, 64, 128),
+        cnn_freq_kernels: tuple = (87, 31, 15),
+        cnn_time_kernel: int = 9,
+        cnn_freq_pool: tuple = (4, 2, 4),
+        transformer_dim: int = 256,
+        transformer_heads: int = 8,
+        transformer_layers: int = 4,
+        dropout: float = 0.1,
+    ):
+        super().__init__()
+        self.cnn = CNNEncoder(
+            n_mels=n_mels,
+            channels=tuple(cnn_channels),
+            freq_kernels=tuple(cnn_freq_kernels),
+            time_kernel=cnn_time_kernel,
+            freq_pool=tuple(cnn_freq_pool),
+            transformer_dim=transformer_dim,
             dropout=dropout,
-            batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
-        # Two output heads: onset and duration
+        self.transformer = TemporalTransformer(
+            d_model=transformer_dim,
+            num_heads=transformer_heads,
+            num_layers=transformer_layers,
+            dropout=dropout,
+        )
         self.onset_head = nn.Linear(transformer_dim, num_keys)
-        
-        if duration_mode == 'bins':
-            # Classification: predict duration bin for each key
-            self.duration_head = nn.Linear(transformer_dim, num_keys * num_duration_bins)
-        else:
-            # Regression: predict continuous duration (log or linear)
-            self.duration_head = nn.Linear(transformer_dim, num_keys)
-        
-        # Optional: frame head for consistency loss (predicting active notes)
         self.frame_head = nn.Linear(transformer_dim, num_keys)
-        
-        # Initialize onset head bias to encourage onset detection from the start
-        # Without this, model predicts ~0 everywhere initially due to extreme sparsity (0.23% positive)
-        # Initialize bias such that sigmoid(bias) ≈ 0.01 (i.e., bias ≈ -4.6)
-        # This gives the model a "head start" on detecting onsets
-        nn.init.constant_(self.onset_head.bias, -4.6)  # sigmoid(-4.6) ≈ 0.01
-        
-    def forward(self, x):
+        self._init_heads()
+
+    def _init_heads(self):
+        """Initialise head biases to reflect the sparsity of each label type.
+
+        Onsets are very sparse (~2% of frames have an onset at any key).
+        Frame activations are denser (~12%).  Starting the sigmoid close to
+        the true base rate avoids large initial focal-loss gradients.
+        """
+        nn.init.constant_(self.onset_head.bias, -4.0)   # sigmoid ≈ 0.018
+        nn.init.constant_(self.frame_head.bias, -2.0)   # sigmoid ≈ 0.119
+
+    def forward(self, x: torch.Tensor) -> dict:
         """
         Args:
-            x: Input spectrogram (batch, 1, freq, time)
-            
+            x: (B, 1, F, T)  log-mel spectrogram
         Returns:
-            Dictionary with 'onset', 'duration', 'frame' predictions
-            - onset: (batch, time, num_keys) - logits
-            - duration: (batch, time, num_keys, num_bins) for classification 
-                       or (batch, time, num_keys) for regression - logits/values
-            - frame: (batch, time, num_keys) - logits
+            dict with:
+              "onset": (B, T, num_keys)  raw logits
+              "frame": (B, T, num_keys)  raw logits
         """
-        # Extract features with CNN
-        x = self.feature_extractor(x)  # (batch_size, time_frames, transformer_dim)
-        
-        # Add positional encoding
-        x = self.pos_encoder(x)  # (batch_size, time_frames, transformer_dim)
-        
-        # Transformer encoding
-        x = self.transformer(x)  # (batch_size, time_frames, transformer_dim)
-        
-        # Apply onset head
-        onset_logits = self.onset_head(x)  # (batch, time, num_keys)
-        
-        # Apply duration head
-        duration_output = self.duration_head(x)
-        if self.duration_mode == 'bins':
-            # Reshape to (batch, time, num_keys, num_bins) for classification
-            batch_size, time_frames, _ = x.shape
-            duration_logits = duration_output.view(batch_size, time_frames, -1, self.num_duration_bins)
-        else:
-            # (batch, time, num_keys) for regression
-            duration_logits = duration_output
-        
-        # Apply frame head for consistency
-        frame_logits = self.frame_head(x)  # (batch, time, num_keys)
-        
+        f = self.cnn(x)          # (B, T, D)
+        f = self.transformer(f)  # (B, T, D)
         return {
-            'onset': onset_logits,
-            'duration': duration_logits,
-            'frame': frame_logits
+            "onset": self.onset_head(f),  # (B, T, 88)
+            "frame": self.frame_head(f),  # (B, T, 88)
         }
 
 
-class PianoTranscriptionModelCNNOnly(nn.Module):
-    """
-    CNN-only model (no Transformer) for ablation study.
-    Frame-by-frame prediction without temporal context.
-    """
-    def __init__(self, n_mels=128, hidden_size=256, num_outputs=91, dropout=0.1):
-        super(PianoTranscriptionModelCNNOnly, self).__init__()
-        
-        # Convolutional feature extractor
-        self.feature_extractor = ConvolutionalFeatureExtractor(n_mels, hidden_size)
-        
-        # Direct output projection (no transformer)
-        self.output_projection = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, num_outputs)
-        )
-        
-    def forward(self, x):
-        """
-        Forward pass - frame-by-frame prediction.
-        
-        Args:
-            x: Input spectrogram (batch_size, 1, n_mels, time_frames)
-            
-        Returns:
-            Output piano roll predictions (batch_size, time_frames, num_outputs)
-        """
-        # Extract features with CNN
-        x = self.feature_extractor(x)  # (batch_size, time_frames, hidden_size)
-        
-        # Direct projection to outputs (no temporal modeling)
-        x = self.output_projection(x)  # (batch_size, time_frames, num_outputs)
-        
-        # Apply sigmoid for binary predictions
-        x = torch.sigmoid(x)
-        
-        return x
-
+# ---------------------------------------------------------------------------
+# Quick sanity check
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from config import CONFIG, NUM_OUTPUTS
-    
-    # Test onset + duration model
-    print("="*80)
-    print("ONSET + DURATION MODEL (CNN + Transformer)")
-    print("="*80)
-    print(f"Duration mode: {CONFIG['duration_mode']}")
-    
-    model = PianoTranscriptionModel(
-        input_features=CONFIG['n_mels'],
-        num_keys=CONFIG['num_keys'],
-        cnn_channels=[32, 64, 128],
-        transformer_dim=CONFIG['hidden_size'],
-        num_heads=CONFIG['num_heads'],
-        num_layers=CONFIG['num_layers'],
-        dropout=CONFIG['dropout'],
-        duration_mode=CONFIG['duration_mode'],
-        num_duration_bins=CONFIG['num_duration_bins']
-    )
-    
-    # Create dummy input
-    batch_size = 4
-    time_frames = CONFIG['snippet_frames']
-    dummy_input = torch.randn(batch_size, 1, CONFIG['n_mels'], time_frames)
-    
-    # Forward pass
-    output = model(dummy_input)
-    print(f"Input shape: {dummy_input.shape}")
-    print(f"Output shapes:")
-    print(f"  - onset: {output['onset'].shape}")
-    print(f"  - duration: {output['duration'].shape}")
-    print(f"  - frame: {output['frame'].shape}")
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
-    
-    # Test with different duration modes
-    print("\n" + "="*80)
-    print("TESTING DIFFERENT DURATION MODES")
-    print("="*80)
-    
-    for mode in ['bins', 'log', 'linear']:
-        model_test = PianoTranscriptionModel(
-            input_features=CONFIG['n_mels'],
-            num_keys=CONFIG['num_keys'],
-            transformer_dim=CONFIG['hidden_size'],
-            num_heads=CONFIG['num_heads'],
-            num_layers=CONFIG['num_layers'],
-            dropout=CONFIG['dropout'],
-            duration_mode=mode,
-            num_duration_bins=CONFIG['num_duration_bins']
-        )
-        out = model_test(dummy_input)
-        print(f"{mode:10s} mode - duration shape: {out['duration'].shape}")
-    
-    print("\n" + "="*80)
-    print("CNN-ONLY MODEL (Ablation Study)")
-    print("="*80)
-    model_cnn = PianoTranscriptionModelCNNOnly(
-        n_mels=CONFIG['n_mels'],
-        hidden_size=CONFIG['hidden_size'],
-        num_outputs=NUM_OUTPUTS,
-        dropout=CONFIG['dropout']
-    )
-    
-    output_cnn = model_cnn(dummy_input)
-    print(f"Input shape: {dummy_input.shape}")
-    print(f"Output shape: {output_cnn.shape}")
-    print(f"Model parameters: {sum(p.numel() for p in model_cnn.parameters()):,}")
-    
-    print("\n" + "="*80)
-    print("COMPARISON")
-    print("="*80)
-    full_params = sum(p.numel() for p in model.parameters())
-    cnn_params = sum(p.numel() for p in model_cnn.parameters())
-    print(f"Onset+Duration model: {full_params:,} parameters")
-    print(f"CNN-only: {cnn_params:,} parameters")
-    print(f"Transformer overhead: {full_params - cnn_params:,} parameters ({(full_params - cnn_params) / full_params * 100:.1f}%)")
-    print("="*80)
+    model = PianoTranscriptionModel()
+    n = sum(p.numel() for p in model.parameters())
+    print(f"Parameters: {n:,}")
+    x = torch.randn(2, 1, CONFIG["n_mels"], 300)
+    out = model(x)
+    print(f"Input: {tuple(x.shape)}")
+    print(f"Onset: {tuple(out['onset'].shape)}")
+    print(f"Frame: {tuple(out['frame'].shape)}")

@@ -2,73 +2,105 @@ CONFIG = {
     'sample_rate': 48000,
     'roll_fps': 100,
     'num_keys': 88,
-    'n_mels': 88 * 4,                       # 4 bins per key (352 total)
-    'n_fft': 4096,                          # Larger FFT for better freq resolution
+    'n_mels': 88 * 4,
+    'n_fft': 4096,
     'plot_pngs': True,
-    
+
     # Data paths
     'data_dir': './processed_data_17_18',
-    'split_year_folder': "2013",
-    'maestro_json': './maestro-v3.0.0.json',  # Path to MAESTRO metadata for proper train/val/test split
-    
-    # Onset/Duration parameters (NEW)
-    'onset_frames': 2,                      # Mark onset in N consecutive frames (helps with alignment)
-    'duration_mode': 'log',                 # 'bins' for classification, 'log' for log-regression, 'linear' for linear regression
-    'num_duration_bins': 8,                 # Number of duration bins (only used if duration_mode='bins')
-    'min_note_duration': 0.05,              # Minimum note duration in seconds
-    
-    # Training parameters
-    'snippet_duration': 3.0,
-    'batch_size': 8,                        # REDUCED for faster testing
-    'learning_rate': 5e-5,
-    'num_epochs': 500,                       # REDUCED for quick test
-    'hidden_size': 256,
-    'num_heads': 8,
-    'num_layers': 4,
-    'dropout': 0.2,
-    'weight_decay': 5e-7,
-    
-    # Multi-task loss weights (UPDATED for onset + duration)
-    'onset_weight': 1.0,                   # INCREASED: Onset detection is the hardest task
-    'duration_weight': 5.0,                 # INCREASED: Need to learn durations better
-    'frame_weight': 1.0,                    # DECREASED: Frame is auxiliary, should not dominate
-    'consistency_weight': 0.5,              # Temporal consistency loss weight
-    
-    # Gaussian onset smoothing (sigma annealing)
-    'initial_sigma': 1.5,                   # Fixed Gaussian sigma (bins) - no annealing
-    'final_sigma': 1.5,                     # Fixed Gaussian sigma (bins) - no annealing
-    'sigma_anneal_threshold': 0.4,          # Start annealing when onset F1 > this threshold
-    'sigma_anneal_epochs': 50,              # Duration of sigma annealing in epochs
-    
-    # Focal Loss parameters (for handling extreme class imbalance)
-    'use_focal_loss': True,                 # Use Focal Loss instead of BCE
-    'onset_focal_alpha': 0.90,              # INCREASED: Alpha for onset (need more focus on rare positives)
-    'onset_focal_gamma': 2.0,               # Gamma for onset (2.0 = standard)
-    'frame_focal_alpha': 0.25,              # Alpha for frame (lower since frames are less rare)
-    'frame_focal_gamma': 2.0,               # Gamma for frame
-    
-    # Data augmentation settings
-    'snippets_per_file': 50,                # REDUCED for faster testing
-    'data_fraction': 1.0,                     # REDUCED: Use 5% of dataset for quick test
-    'fixed_snippets': False,                # ONLY True for OVERFIT: Use FIXED snippets - see same data every epoch!
+    'maestro_json': './maestro-v3.0.0.json',
+    'split_year_folder': '2013',
 
-    # Model architecture
-    'use_cnn_only': False,                  # If True, use CNN-only model (ablation study)
-    
+    # Data/label semantics
+    'onset_frames': 2,
+    'duration_mode': 'log',
+    'num_duration_bins': 8,
+    'min_note_duration': 0.05,
+
+    # Normalization
+    'normalization_mode': 'global',         # one of: none, global
+
+    # Training data slicing
+    'snippet_duration': 3.0,
+    'snippets_per_file': 10,   # × 444 files / B=16 → ~277 batches/epoch (~8-9h overnight)
+    'data_fraction': 1.0,
+    'fixed_snippets': False,
+
+    # Onset-aware sampling
+    'sampling_mode': 'onset_aware',         # one of: random, onset_aware
+    'onset_sampling_min_active_ratio': 0.5,
+
+    # Optimization
+    'batch_size': 16,
+    'learning_rate': 1e-4,
+    'num_epochs': 200,
+    'weight_decay': 1e-4,
+    'grad_clip_norm': 1.0,
+    'deterministic_seed': 42,
+    'use_amp': True,
+
+    # Model architecture (separable CNN + Transformer)
+    # CNN stage: three ConvBlocks with alternating freq + time convolutions.
+    # freq_kernels shrink at each stage because the effective receptive field
+    # grows through the pooling chain; pool factors must divide n_mels (352).
+    'cnn_channels':     [32, 64, 128],
+    'cnn_freq_kernels': [87, 31, 15],   # odd, for same-padding
+    'cnn_time_kernel':  9,
+    'cnn_freq_pool':    [4, 2, 4],      # 352→88→44→11 (total ÷32)
+    # Transformer stage
+    'transformer_dim':     256,
+    'transformer_heads':   8,
+    'transformer_layers':  4,
+    'dropout': 0.1,
+
+    # Losses (onset + frame only; duration head removed)
+    'onset_weight': 3.0,
+    'frame_weight': 1.0,
+
+    # Imbalance handling
+    'onset_loss_type': 'focal',
+    'frame_loss_type': 'focal',
+    'use_computed_pos_weight': True,
+    'max_pos_weight': 1000.0,
+    'onset_focal_alpha': 0.9,
+    'onset_focal_gamma': 2.0,
+    'frame_focal_alpha': 0.5,
+    'frame_focal_gamma': 2.0,
+
+    # Threshold sweep & metric tolerance
+    'threshold_sweep_values': [0.2, 0.3, 0.4, 0.5, 0.6],
+    'onset_tolerance_frames': 2,           # ±20 ms at 100 fps — key must be exact
+    'max_collect_batches': 64,             # batches to collect for metrics per epoch
+    'default_inference_onset_threshold': 0.5,
+    'default_inference_frame_threshold': 0.4,
+    'inference_apply_onset_frame_gating': True,
+    'inference_temporal_median_kernel': 3,
+    'inference_min_active_frames': 1,
+
+    # Visualization/runtime behavior
+    'visualize_every_n_epochs': 10,
+    'enable_visualization': True,
+
     # Learning rate scheduler settings
     'use_lr_scheduler': True,
-    'scheduler_type': 'cosine_warmup',
-    'warmup_epochs': 5,                     # REDUCED for quick test
+    'scheduler_type': 'reduce_on_plateau',
+    'scheduler_factor': 0.5,
+    'scheduler_patience': 12,
+    'warmup_epochs': 10,
     'scheduler_min_lr': 5e-7,
-    
-    # DataLoader optimization settings
-    'num_workers': 12,                       # Set to 0 for debugging/testing
+
+    # DataLoader settings
+    'num_workers': 4,
     'pin_memory': False,
     'prefetch_factor': 2,
-    'persistent_workers': True,            # Set to False when num_workers=0
+    'persistent_workers': True,
     'preload_into_ram': False,
-    
-    # Training mode settings
+
+    # Optional overfit switch for CLI
+    'overfit_mode': False,
+    'overfit_num_files': 2,
+
+    # Training behavior
     'shuffle_train': True,
 }
 
