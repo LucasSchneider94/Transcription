@@ -287,15 +287,9 @@ async function renderScore(container: HTMLDivElement, rawNotes: Note[]) {
     }
   }
 
-  // ── Recolour SVG for dark background ─────────────────────────────────────
+  // ── Ensure SVG is transparent so the white container bg shows through ────
   const svg = container.querySelector("svg");
   if (svg) {
-    svg.style.background = "#16161f";
-    svg.querySelectorAll<SVGElement>("path,rect,circle,text,line,polyline").forEach(el => {
-      const f = el.getAttribute("fill");
-      const s = el.getAttribute("stroke");
-      if (f === "black" || f === "#000000" || f === "rgb(0,0,0)") el.setAttribute("fill",   "#e2e8f0");
-      if (s === "black" || s === "#000000" || s === "rgb(0,0,0)") el.setAttribute("stroke", "#e2e8f0");
-    });
+    svg.style.background = "transparent";
   }
 }
