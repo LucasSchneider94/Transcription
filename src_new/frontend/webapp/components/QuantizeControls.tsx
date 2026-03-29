@@ -120,8 +120,8 @@ export default function QuantizeControls({ params, detectedBPM, onChange }: Prop
           </div>
           <div className="flex items-center gap-2">
             <Slider
-              min={-(60 / params.bpm)}
-              max={60 / params.bpm}
+              min={-4}
+              max={4}
               step={0.001}
               value={params.beatOffset}
               onChange={v => set("beatOffset", v)}

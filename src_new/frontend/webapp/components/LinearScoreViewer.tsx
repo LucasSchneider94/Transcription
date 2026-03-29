@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import type { Note } from "@/app/page";
 import {
-  r2g, groupChords, buildVoiceMeasure, type VexClasses,
+  r2g, groupChords, buildVoiceMeasure, splitChordsBetweenVoices, FLAT_KEYS, type VexClasses,
 } from "@/lib/vexHelpers";
 
 // Must match PianoRollViewer's PX_PER_S so barlines align exactly.
@@ -78,10 +78,11 @@ async function renderLinearScore(
 
   // BPB in quarter-beat units (e.g. 6/8 → 6*(4/8)=3)
   const BPB = timeSigNum * (4 / timeSigDen);
+  const flatSpelling = FLAT_KEYS.has(keySig);
 
-  // Build one Measure { t, b } per bar using allBars intervals
+  // Build one Measure per bar — up to 2 voices per stave for polyphony
   type SN      = InstanceType<typeof StaveNote>;
-  type Measure = { t: SN[]; b: SN[]; barStart: number; barDur: number };
+  type Measure = { t1: SN[]; t2: SN[] | null; b1: SN[]; b2: SN[] | null; barStart: number; barDur: number };
 
   const measures: Measure[] = [];
 
@@ -89,26 +90,25 @@ async function renderLinearScore(
     const barStart = allBars[bi];
     const barEnd   = allBars[bi + 1];
     const barDur   = barEnd - barStart;
-    if (barStart < -prevDur * 1.1) continue;           // before visible range
-    if (barStart > totalWidth / PX_PER_S + lastDur * 0.1) break; // past end
+    if (barStart < -prevDur * 1.1) continue;
+    if (barStart > totalWidth / PX_PER_S + lastDur * 0.1) break;
 
-    // Local beat duration for this bar (may vary if user dragged barlines)
-    const beatS = barDur / timeSigNum;
-
-    // Map absolute time → beat index within this bar (0-based)
+    const beatS      = barDur / timeSigNum;
     const timeToBeat = (t: number) => r2g((t - barStart) / beatS);
 
-    const inBar     = notes.filter(n => n.start >= barStart - 0.02 && n.start < barEnd - 0.02);
-    const trebleIn  = inBar.filter(n => n.midi_note >= 60);
-    const bassIn    = inBar.filter(n => n.midi_note < 60);
+    const inBar    = notes.filter(n => n.start >= barStart - 0.02 && n.start < barEnd - 0.02);
+    const trebleIn = inBar.filter(n => n.midi_note >= 60);
+    const bassIn   = inBar.filter(n => n.midi_note < 60);
 
-    const trebleChords = groupChords(trebleIn, timeToBeat, beatS);
-    const bassChords   = groupChords(bassIn,   timeToBeat, beatS);
+    const [t1c, t2c] = splitChordsBetweenVoices(groupChords(trebleIn, timeToBeat, beatS));
+    const [b1c, b2c] = splitChordsBetweenVoices(groupChords(bassIn,   timeToBeat, beatS));
 
     measures.push({
       barStart, barDur,
-      t: buildVoiceMeasure(trebleChords, 0, BPB, "treble", vex) as SN[],
-      b: buildVoiceMeasure(bassChords,   0, BPB, "bass",   vex) as SN[],
+      t1: buildVoiceMeasure(t1c, 0, BPB, "treble", vex, flatSpelling) as SN[],
+      t2: t2c.length > 0 ? buildVoiceMeasure(t2c, 0, BPB, "treble", vex, flatSpelling) as SN[] : null,
+      b1: buildVoiceMeasure(b1c, 0, BPB, "bass",   vex, flatSpelling) as SN[],
+      b2: b2c.length > 0 ? buildVoiceMeasure(b2c, 0, BPB, "bass",   vex, flatSpelling) as SN[] : null,
     });
   }
 
@@ -125,7 +125,7 @@ async function renderLinearScore(
   const FIRST_OVERHEAD = 160;
 
   for (let mi = 0; mi < measures.length; mi++) {
-    const { barStart, barDur, t, b } = measures[mi];
+    const { barStart, barDur, t1, t2, b1, b2 } = measures[mi];
     const first  = mi === 0;
     const x      = barStart * PX_PER_S;
     const w      = barDur   * PX_PER_S;
@@ -141,18 +141,40 @@ async function renderLinearScore(
     ts.setContext(ctx).draw();
     bs.setContext(ctx).draw();
 
-    if (t.length === 0 && b.length === 0) continue;
-
     try {
-      const tv = new Voice({ num_beats: timeSigNum, beat_value: timeSigDen }).setStrict(false);
-      const bv = new Voice({ num_beats: timeSigNum, beat_value: timeSigDen }).setStrict(false);
-      tv.addTickables(t);
-      bv.addTickables(b);
-      new Formatter().joinVoices([tv]).joinVoices([bv]).format([tv, bv], noteW);
-      tv.draw(ctx, ts);
-      bv.draw(ctx, bs);
-      Beam.generateBeams(t.filter(n => !n.isRest())).forEach(beam => beam.setContext(ctx).draw());
-      Beam.generateBeams(b.filter(n => !n.isRest())).forEach(beam => beam.setContext(ctx).draw());
+      type VoiceInst = InstanceType<typeof Voice>;
+      const makeVoice = (sns: SN[]): VoiceInst =>
+        new Voice({ num_beats: timeSigNum, beat_value: timeSigDen }).setStrict(false)
+          .addTickables(sns) as VoiceInst;
+
+      const tv1 = makeVoice(t1);
+      const bv1 = makeVoice(b1);
+      const tv2 = t2 ? makeVoice(t2) : null;
+      const bv2 = b2 ? makeVoice(b2) : null;
+
+      const allVoices = [tv1, bv1, ...(tv2 ? [tv2] : []), ...(bv2 ? [bv2] : [])];
+
+      // Resolve accidentals with key-sig context across all voices in this bar
+      (Accidental as unknown as { applyAccidentals: (vs: unknown[], k: string) => void })
+        .applyAccidentals(allVoices, keySig);
+
+      const fmt = new Formatter();
+      if (tv2) fmt.joinVoices([tv1, tv2]); else fmt.joinVoices([tv1]);
+      if (bv2) fmt.joinVoices([bv1, bv2]); else fmt.joinVoices([bv1]);
+      fmt.format(allVoices, noteW);
+
+      tv1.draw(ctx, ts);
+      tv2?.draw(ctx, ts);
+      bv1.draw(ctx, bs);
+      bv2?.draw(ctx, bs);
+
+      const beamVoice = (sns: SN[]) =>
+        Beam.generateBeams(sns.filter(n => !n.isRest()))
+            .forEach(beam => beam.setContext(ctx).draw());
+      beamVoice(t1);
+      if (t2) beamVoice(t2);
+      beamVoice(b1);
+      if (b2) beamVoice(b2);
     } catch (e) {
       console.warn(`LinearScoreViewer bar ${mi}:`, e);
     }

@@ -47,9 +47,10 @@ export default function PianoRollViewer({
 
   // Register MIDI export callback with parent — uses editNotes so edits are exported
   useEffect(() => {
-    onRegisterMidiExport?.(() => exportMidi(editNotes, timeSigNum, timeSigDen, bpm));
+    const beatOffset = barTimes?.[0] ?? 0;
+    onRegisterMidiExport?.(() => exportMidi(editNotes, timeSigNum, timeSigDen, bpm, beatOffset));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editNotes, timeSigNum, timeSigDen, bpm]);
+  }, [editNotes, timeSigNum, timeSigDen, bpm, barTimes]);
 
   const totalWidth  = Math.ceil(result.duration * PX_PER_S);
   const totalHeight = N_KEYS * ROW_H;
@@ -256,7 +257,26 @@ export default function PianoRollViewer({
             <div
               className="relative"
               style={{ width: totalWidth, height: totalHeight }}
-              onClick={() => setSelected(null)}
+              onClick={(e) => {
+                // Only fires when clicking empty canvas area
+                // (NoteBlock and BarHandle stop propagation)
+                const x = e.nativeEvent.offsetX;
+                const y = e.nativeEvent.offsetY;
+                const pitchRaw = PITCH_MAX - Math.floor(y / ROW_H);
+                const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, pitchRaw));
+                const stepS = beatGrid?.subs && beatGrid.subs.length >= 2
+                  ? beatGrid.subs[1] - beatGrid.subs[0]
+                  : 60 / bpm / 4;
+                const startSnapped = snapToGrid(Math.max(0, x / PX_PER_S));
+                const newNote: Note = {
+                  start: startSnapped,
+                  end:   startSnapped + stepS * 2,
+                  pitch,
+                  midi_note: pitch,
+                  note_name: "",
+                };
+                setEditNotes(prev => { setSelected(prev.length); return [...prev, newNote]; });
+              }}
             >
               <canvas
                 ref={canvasRef}
@@ -504,10 +524,24 @@ function NoteBlock({
 // Hand-rolled minimal Standard MIDI File (SMF format 0) writer.
 // No external library — keeps the bundle lean and avoids SSR issues.
 
-function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number, bpm: number): Uint8Array {
-  const PPQ         = 480;   // pulses per quarter note
-  const TEMPO       = Math.round(60_000_000 / bpm); // microseconds per quarter note
-  const beatsPerSec = bpm / 60;
+function writeMidi(
+  notes: AnalysisResult["notes"],
+  timeSigNum: number,
+  timeSigDen: number,
+  bpm: number,
+  beatOffset: number,  // time of bar 1 beat 1 in seconds — subtracted so it maps to tick 0
+): Uint8Array {
+  const PPQ      = 480;   // pulses per quarter note
+  const TEMPO    = Math.round(60_000_000 / bpm);
+  const secPerBeat = 60 / bpm;
+  // Snap granularity: 16th note (PPQ/4 = 120 ticks)
+  // This eliminates floating-point rounding residue from quantization.
+  const SNAP = PPQ / 4;
+
+  function toTick(t: number): number {
+    const raw = (t - beatOffset) / secPerBeat * PPQ;
+    return Math.max(0, Math.round(raw / SNAP) * SNAP);
+  }
 
   function varLen(n: number): number[] {
     const bytes: number[] = [];
@@ -537,11 +571,14 @@ function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDe
   events.push([0, 0xff, 0x58, 0x04, timeSigNum, log2Den, 24, 8]);
 
   for (const note of notes) {
-    const startTick = Math.round(note.start * PPQ * beatsPerSec);
-    const endTick   = Math.round(note.end   * PPQ * beatsPerSec);
+    const startTick = toTick(note.start);
+    const endTick   = Math.max(startTick + SNAP, toTick(note.end));
     const vel = 80;
-    events.push([startTick, 0x90, note.midi_note & 0x7f, vel]);
-    events.push([endTick,   0x80, note.midi_note & 0x7f, 0]);
+    // Channel 0 (0x9n/0x8n, n=0) = treble/right-hand, Channel 1 = bass/left-hand
+    const onCmd  = note.midi_note >= 60 ? 0x90 : 0x91;
+    const offCmd = note.midi_note >= 60 ? 0x80 : 0x81;
+    events.push([startTick, onCmd,  note.midi_note & 0x7f, vel]);
+    events.push([endTick,   offCmd, note.midi_note & 0x7f, 0]);
   }
 
   events.sort((a, b) => a[0] - b[0]);
@@ -570,8 +607,8 @@ function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDe
   return new Uint8Array(header);
 }
 
-function exportMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number, bpm: number) {
-  const data = writeMidi(notes, timeSigNum, timeSigDen, bpm);
+function exportMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number, bpm: number, beatOffset: number) {
+  const data = writeMidi(notes, timeSigNum, timeSigDen, bpm, beatOffset);
   const buf  = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
   const blob = new Blob([buf], { type: "audio/midi" });
   const url  = URL.createObjectURL(blob);
