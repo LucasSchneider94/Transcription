@@ -18,6 +18,7 @@ const config: Config = {
         accent:          "var(--color-accent)",
         "accent-light":  "var(--color-accent-light)",
         "accent-dim":    "var(--color-accent-dim)",
+        "slider-bg":     "var(--slider-bg)",
         muted:           "var(--color-muted)",
       },
     },

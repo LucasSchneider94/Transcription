@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AnalysisResult, Note } from "@/app/page";
 import type { BeatGrid } from "@/lib/quantize";
-import LinearScoreViewer, { LINEAR_SCORE_H } from "@/components/LinearScoreViewer";
+import LinearScoreViewer, { LINEAR_SCORE_H, LINE_SPACING, TREBLE_Y as CLEF_TREBLE_Y, BASS_Y as CLEF_BASS_Y } from "@/components/LinearScoreViewer";
 
 type Props = {
   result:                AnalysisResult;
@@ -12,6 +12,8 @@ type Props = {
   onBarTimesChange?:     (times: number[]) => void;
   timeSigNum?:           number;
   timeSigDen?:           number;
+  bpm?:                  number;
+  keySig?:               string;
   onRegisterMidiExport?: (fn: () => void) => void;
 };
 
@@ -29,7 +31,7 @@ function isBlack(pitch: number) {
 
 export default function PianoRollViewer({
   result, beatGrid, barTimes, onBarTimesChange,
-  timeSigNum = 4, timeSigDen = 4, onRegisterMidiExport,
+  timeSigNum = 4, timeSigDen = 4, bpm = 120, keySig = "C", onRegisterMidiExport,
 }: Props) {
   const canvasRef     = useRef<HTMLCanvasElement>(null);
   const containerRef  = useRef<HTMLDivElement>(null);
@@ -45,9 +47,9 @@ export default function PianoRollViewer({
 
   // Register MIDI export callback with parent — uses editNotes so edits are exported
   useEffect(() => {
-    onRegisterMidiExport?.(() => exportMidi(editNotes, timeSigNum, timeSigDen));
+    onRegisterMidiExport?.(() => exportMidi(editNotes, timeSigNum, timeSigDen, bpm));
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editNotes, timeSigNum, timeSigDen]);
+  }, [editNotes, timeSigNum, timeSigDen, bpm]);
 
   const totalWidth  = Math.ceil(result.duration * PX_PER_S);
   const totalHeight = N_KEYS * ROW_H;
@@ -205,15 +207,9 @@ export default function PianoRollViewer({
       {/* keyboard labels on left, scroll in sync */}
       <div className="flex">
         {/* left strip: clef labels + piano keys */}
-        <div className="flex-shrink-0 w-10">
-          {/* clef placeholder — must match LINEAR_SCORE_H */}
-          <div
-            style={{ height: LINEAR_SCORE_H }}
-            className="bg-white border-r border-gray-300 flex flex-col justify-around items-center select-none"
-          >
-            <span style={{ fontSize: 28, lineHeight: 1, color: "#333" }}>𝄞</span>
-            <span style={{ fontSize: 28, lineHeight: 1, color: "#333" }}>𝄢</span>
-          </div>
+        <div className="flex-shrink-0" style={{ width: CLEF_STRIP_W }}>
+          {/* clef placeholder — VexFlow render, must match LinearScoreViewer layout */}
+          <ClefStrip keySig={keySig} />
           {/* piano keyboard strip */}
           <div className="relative" style={{ height: totalHeight }}>
             {Array.from({ length: N_KEYS }, (_, i) => {
@@ -248,11 +244,12 @@ export default function PianoRollViewer({
           <div style={{ width: totalWidth }}>
             {/* Linear score strip — always visible, shares scroll */}
             <LinearScoreViewer
-              notes={result.notes}
+              notes={editNotes}
               barTimes={barTimes ?? []}
               timeSigNum={timeSigNum}
               timeSigDen={timeSigDen}
               totalWidth={totalWidth}
+              keySig={keySig}
             />
 
             {/* Piano roll canvas + note overlay + draggable barlines */}
@@ -312,6 +309,45 @@ export default function PianoRollViewer({
         {selected !== null && " · selected — ←/→ move, ↑/↓ lengthen/shorten, Del removes"}
       </p>
     </div>
+  );
+}
+
+// ─── Fixed clef strip (VexFlow, left of scroll area) ──────────────────────────
+
+// These must mirror the constants in LinearScoreViewer.tsx
+// These mirror LinearScoreViewer's TREBLE_Y, BASS_Y — imported above
+const CLEF_STRIP_W  = 120;
+
+function ClefStrip({ keySig }: { keySig: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!ref.current) return;
+    const el = ref.current;
+    (async () => {
+      const { Renderer, Stave } = await import("vexflow");
+      el.innerHTML = "";
+      const renderer = new Renderer(el, Renderer.Backends.SVG);
+      renderer.resize(CLEF_STRIP_W, LINEAR_SCORE_H);
+      const ctx = renderer.getContext();
+      const opts = { spacing_between_lines_px: LINE_SPACING };
+      const ts = new Stave(0, CLEF_TREBLE_Y, CLEF_STRIP_W, opts);
+      const bs = new Stave(0, CLEF_BASS_Y,   CLEF_STRIP_W, opts);
+      ts.addClef("treble"); ts.addKeySignature(keySig);
+      bs.addClef("bass");   bs.addKeySignature(keySig);
+      ts.setContext(ctx).draw();
+      bs.setContext(ctx).draw();
+      const svg = el.querySelector("svg");
+      if (svg) { svg.style.background = "white"; svg.style.overflow = "visible"; }
+    })().catch(e => console.warn("ClefStrip:", e));
+  }, [keySig]);
+
+  return (
+    <div
+      ref={ref}
+      style={{ width: CLEF_STRIP_W, height: LINEAR_SCORE_H, flexShrink: 0 }}
+      className="bg-white border-r border-gray-300 [&_text]:fill-black [&_path]:stroke-black select-none"
+    />
   );
 }
 
@@ -468,9 +504,10 @@ function NoteBlock({
 // Hand-rolled minimal Standard MIDI File (SMF format 0) writer.
 // No external library — keeps the bundle lean and avoids SSR issues.
 
-function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number): Uint8Array {
-  const PPQ    = 480;   // pulses per quarter note
-  const TEMPO  = 500000; // microseconds per quarter note = 120 BPM default
+function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number, bpm: number): Uint8Array {
+  const PPQ         = 480;   // pulses per quarter note
+  const TEMPO       = Math.round(60_000_000 / bpm); // microseconds per quarter note
+  const beatsPerSec = bpm / 60;
 
   function varLen(n: number): number[] {
     const bytes: number[] = [];
@@ -500,8 +537,8 @@ function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDe
   events.push([0, 0xff, 0x58, 0x04, timeSigNum, log2Den, 24, 8]);
 
   for (const note of notes) {
-    const startTick = Math.round(note.start * PPQ * 2); // *2 because 120BPM → 0.5s/beat
-    const endTick   = Math.round(note.end   * PPQ * 2);
+    const startTick = Math.round(note.start * PPQ * beatsPerSec);
+    const endTick   = Math.round(note.end   * PPQ * beatsPerSec);
     const vel = 80;
     events.push([startTick, 0x90, note.midi_note & 0x7f, vel]);
     events.push([endTick,   0x80, note.midi_note & 0x7f, 0]);
@@ -533,8 +570,8 @@ function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDe
   return new Uint8Array(header);
 }
 
-function exportMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number) {
-  const data = writeMidi(notes, timeSigNum, timeSigDen);
+function exportMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number, bpm: number) {
+  const data = writeMidi(notes, timeSigNum, timeSigDen, bpm);
   const buf  = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
   const blob = new Blob([buf], { type: "audio/midi" });
   const url  = URL.createObjectURL(blob);

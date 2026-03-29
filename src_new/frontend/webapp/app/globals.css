@@ -23,22 +23,25 @@
 
   /* backgrounds */
   --color-bg:          #0b000d;
-  --color-surface:     #120411c7;
+  --color-surface:     #120411a1;
   --color-surface2:    #1f1f1f;
 
   /* borders */
   --color-border:      #262626;
   --color-border-strong: #4c4c4c;
 
+  /* sliders */
+  --slider-bg:         #593972bb;   /* track background for all sliders */
+
   /* accent*/
   --color-accent:      #ae1751;   /* primary interactive */
   --color-accent-light: #e91e63;  /* hover / lighter variant */
   --color-accent-cool: #9c2780;   /* end of gradient */
   --color-accent-dim:  #572780;
-
+  
   /* text */
   --color-text:        #ccd8cc;
-  --color-muted:       #57acdc;
+  --color-muted:       #67a9cf;
 
   /* piano roll canvas */
   --roll-bg:           #0b0b0b;
@@ -47,8 +50,8 @@
   --roll-grid:         #1f1f1f;
   --roll-beat:         #572780;  /* quarter-note beat lines */
   --roll-bar:          #572780;  /* bar lines */
-  --roll-note-white:   #276880;
-  --roll-note-black:   #276880;
+  --roll-note-white:   #2e82a0;
+  --roll-note-black:   #2e82a0;
   --note-highlight:   #57acdc;
 }
 
@@ -59,6 +62,11 @@ body {
   color: var(--color-text);
   font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
+
+
+
+/* All range inputs are rendered opacity-0 behind custom div overlays (see Slider.tsx / TimeRangeSelector.tsx) */
+input[type="range"] { -webkit-appearance: none; appearance: none; background: transparent; }
 
 /* custom scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }

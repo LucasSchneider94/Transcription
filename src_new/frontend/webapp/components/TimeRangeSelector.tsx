@@ -30,7 +30,7 @@ export default function TimeRangeSelector({ duration, start, end, onChange }: Pr
           }}
         />
         {/* base track */}
-        <div className="absolute inset-x-0 h-1.5 bg-border rounded-full -z-10" />
+        <div className="absolute inset-x-0 h-1.5 rounded-full -z-10" style={{ background: 'var(--slider-bg)' }} />
 
         {/* start thumb */}
         <input

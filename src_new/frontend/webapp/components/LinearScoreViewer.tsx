@@ -9,9 +9,11 @@ import {
 // Must match PianoRollViewer's PX_PER_S so barlines align exactly.
 const PX_PER_S = 80;
 
-const TREBLE_Y   = 28;
-const BASS_Y     = 128;
-export const LINEAR_SCORE_H = 220;  // total height of the score strip
+const TREBLE_Y   = 20;
+const BASS_Y     = 110;
+export const LINEAR_SCORE_H = 230;  // total height of the score strip
+export const LINE_SPACING   = 14;   // px between stave lines (controls clef size)
+export { TREBLE_Y, BASS_Y };
 
 type Props = {
   notes:      Note[];
@@ -19,10 +21,11 @@ type Props = {
   timeSigNum: number;
   timeSigDen: number;
   totalWidth: number;
+  keySig?:    string;
 };
 
 export default function LinearScoreViewer({
-  notes, barTimes, timeSigNum, timeSigDen, totalWidth,
+  notes, barTimes, timeSigNum, timeSigDen, totalWidth, keySig = "C",
 }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -31,9 +34,9 @@ export default function LinearScoreViewer({
       if (ref.current) ref.current.innerHTML = "";
       return;
     }
-    renderLinearScore(ref.current, notes, barTimes, timeSigNum, timeSigDen, totalWidth)
+    renderLinearScore(ref.current, notes, barTimes, timeSigNum, timeSigDen, totalWidth, keySig)
       .catch(e => console.warn("LinearScoreViewer:", e));
-  }, [notes, barTimes, timeSigNum, timeSigDen, totalWidth]);
+  }, [notes, barTimes, timeSigNum, timeSigDen, totalWidth, keySig]);
 
   return (
     <div
@@ -55,6 +58,7 @@ async function renderLinearScore(
   timeSigNum: number,
   timeSigDen: number,
   totalWidth: number,
+  keySig:     string,
 ) {
   const { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, Beam } =
     await import("vexflow");
@@ -118,7 +122,7 @@ async function renderLinearScore(
   // which correctly sizes clefs relative to the stave line spacing.
 
   // Width reserved for clef + time sig on the first stave
-  const FIRST_OVERHEAD = 100;
+  const FIRST_OVERHEAD = 160;
 
   for (let mi = 0; mi < measures.length; mi++) {
     const { barStart, barDur, t, b } = measures[mi];
@@ -127,11 +131,12 @@ async function renderLinearScore(
     const w      = barDur   * PX_PER_S;
     const noteW  = Math.max(4, w - (first ? FIRST_OVERHEAD : 20));
 
-    const ts = new Stave(x, TREBLE_Y, w);
-    const bs = new Stave(x, BASS_Y,   w);
+    const staveOpts = { spacing_between_lines_px: LINE_SPACING };
+    const ts = new Stave(x, TREBLE_Y, w, staveOpts);
+    const bs = new Stave(x, BASS_Y,   w, staveOpts);
     if (first) {
-      ts.addClef("treble"); ts.addTimeSignature(`${timeSigNum}/${timeSigDen}`);
-      bs.addClef("bass");   bs.addTimeSignature(`${timeSigNum}/${timeSigDen}`);
+      ts.addClef("treble"); ts.addKeySignature(keySig); ts.addTimeSignature(`${timeSigNum}/${timeSigDen}`);
+      bs.addClef("bass");   bs.addKeySignature(keySig); bs.addTimeSignature(`${timeSigNum}/${timeSigDen}`);
     }
     ts.setContext(ctx).draw();
     bs.setContext(ctx).draw();

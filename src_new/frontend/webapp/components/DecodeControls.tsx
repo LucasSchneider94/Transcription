@@ -1,7 +1,7 @@
 "use client";
 
 import type { DecodeParams } from "@/lib/decode";
-import { useNoScrollOnFocus } from "@/lib/useNoScrollOnFocus";
+import Slider from "@/components/Slider";
 
 type Props = {
   params: DecodeParams;
@@ -26,8 +26,6 @@ const SLIDERS: SliderDef[] = [
 ];
 
 export default function DecodeControls({ params, onChange }: Props) {
-  const noScroll = useNoScrollOnFocus();
-
   function set<K extends keyof DecodeParams>(key: K, value: DecodeParams[K]) {
     onChange({ ...params, [key]: value });
   }
@@ -49,13 +47,10 @@ export default function DecodeControls({ params, onChange }: Props) {
                   {format ? format(val) : val.toFixed(step < 0.1 ? 2 : 0)}
                 </span>
               </div>
-              <input
-                type="range"
+              <Slider
                 min={min} max={max} step={step}
                 value={val}
-                onChange={(e) => set(key, parseFloat(e.target.value) as DecodeParams[typeof key])}
-                {...noScroll}
-                className="w-full accent-[color:var(--color-accent)] h-1.5 rounded-full cursor-pointer"
+                onChange={(v) => set(key, v as DecodeParams[typeof key])}
               />
             </div>
           );

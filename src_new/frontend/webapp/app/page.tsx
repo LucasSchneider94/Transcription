@@ -10,6 +10,24 @@ import { decodeNotes, DEFAULT_DECODE_PARAMS, type DecodeParams } from "@/lib/dec
 import { quantizeNotes, quantizeNotesFromBarTimes, estimateBPM, buildBeatGrid, buildGridFromBarTimes, DEFAULT_QUANTIZE_PARAMS, type QuantizeParams, type BeatGrid } from "@/lib/quantize";
 import { Music2, Loader2, Download } from "lucide-react";
 
+const KEY_OPTIONS = [
+  { label: "C major",  vex: "C"   }, { label: "G major",  vex: "G"   },
+  { label: "D major",  vex: "D"   }, { label: "A major",  vex: "A"   },
+  { label: "E major",  vex: "E"   }, { label: "B major",  vex: "B"   },
+  { label: "F♯ major", vex: "F#"  }, { label: "C♯ major", vex: "C#"  },
+  { label: "F major",  vex: "F"   }, { label: "B♭ major", vex: "Bb"  },
+  { label: "E♭ major", vex: "Eb"  }, { label: "A♭ major", vex: "Ab"  },
+  { label: "D♭ major", vex: "Db"  }, { label: "G♭ major", vex: "Gb"  },
+  { label: "C♭ major", vex: "Cb"  },
+  { label: "A minor",  vex: "Am"  }, { label: "E minor",  vex: "Em"  },
+  { label: "B minor",  vex: "Bm"  }, { label: "F♯ minor", vex: "F#m" },
+  { label: "C♯ minor", vex: "C#m" }, { label: "G♯ minor", vex: "G#m" },
+  { label: "D minor",  vex: "Dm"  }, { label: "G minor",  vex: "Gm"  },
+  { label: "C minor",  vex: "Cm"  }, { label: "F minor",  vex: "Fm"  },
+  { label: "B♭ minor", vex: "Bbm" }, { label: "E♭ minor", vex: "Ebm" },
+  { label: "A♭ minor", vex: "Abm" },
+] as const;
+
 export type Note = {
   pitch: number;
   start: number;
@@ -40,6 +58,7 @@ export default function Home() {
   const [decodeParams, setDecodeParams] = useState<DecodeParams>(DEFAULT_DECODE_PARAMS);
   const [quantizeParams, setQuantizeParams] = useState<QuantizeParams>(DEFAULT_QUANTIZE_PARAMS);
   const [barTimes, setBarTimes] = useState<number[]>([]);
+  const [keySig, setKeySig]     = useState("C");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const midiExportRef = useRef<MidiExportFn | null>(null);
 
@@ -151,7 +170,6 @@ export default function Home() {
     <div className="max-w-6xl mx-auto px-6 py-10 space-y-8">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <Music2 className="ttext-2xl w-8 h-8" />
         <div>
           <h1 className="text-6xl font-extralight tracking-tight">Automatic Piano Music Transcription</h1>
           <p className="text-muted text-sm">Upload a piano recording and get an AI-generated transcription.</p>
@@ -180,23 +198,21 @@ export default function Home() {
             end={endTime}
             onChange={(s, e) => { setStartTime(s); setEndTime(e); }}
           />
+          <div className="flex justify-end">
+            <button
+              onClick={handleAnalyze}
+              disabled={loading}
+              className="px-5 py-2 rounded-lg bg-accent hover:bg-accent-light disabled:opacity-50 disabled:cursor-not-allowed
+                         font-semibold text-sm text-white transition-colors flex items-center gap-2"
+            >
+              {loading ? (
+                <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Analysing…</>
+              ) : (
+                "Analyse"
+              )}
+            </button>
+          </div>
         </section>
-      )}
-
-      {/* Step 3 – Analyse button */}
-      {file && (
-        <button
-          onClick={handleAnalyze}
-          disabled={loading}
-          className="w-full py-3 rounded-xl bg-accent hover:bg-accent-light disabled:opacity-50 disabled:cursor-not-allowed
-                     font-semibold text-white transition-colors flex items-center justify-center gap-2"
-        >
-          {loading ? (
-            <><Loader2 className="w-4 h-4 animate-spin" /> Analysing…</>
-          ) : (
-            "Analyse"
-          )}
-        </button>
       )}
 
       {/* Error */}
@@ -230,6 +246,20 @@ export default function Home() {
             />
           </div>
 
+          {/* Key selector */}
+          <div className="flex items-center gap-3">
+            <span className="text-xs font-semibold uppercase tracking-widest text-muted select-none">Key</span>
+            <select
+              value={keySig}
+              onChange={e => setKeySig(e.target.value)}
+              className="bg-surface border border-border rounded-lg px-2 py-1 text-sm text-white"
+            >
+              {KEY_OPTIONS.map(k => (
+                <option key={k.vex} value={k.vex}>{k.label}</option>
+              ))}
+            </select>
+          </div>
+
           <p className="text-xs text-muted">
             {displayResult.notes.length} notes · {displayResult.duration.toFixed(2)} s · {displayResult.fps.toFixed(2)} fps
           </p>
@@ -241,6 +271,8 @@ export default function Home() {
             onBarTimesChange={setBarTimes}
             timeSigNum={quantizeParams.timeSigNum}
             timeSigDen={quantizeParams.timeSigDen}
+            bpm={quantizeParams.bpm}
+            keySig={keySig}
             onRegisterMidiExport={fn => { midiExportRef.current = fn; }}
           />
         </section>

@@ -1,7 +1,7 @@
 "use client";
 
 import type { QuantizeParams } from "@/lib/quantize";
-import { useNoScrollOnFocus } from "@/lib/useNoScrollOnFocus";
+import Slider from "@/components/Slider";
 
 type Props = {
   params:      QuantizeParams;
@@ -17,8 +17,6 @@ const SUBDIVISIONS = [
 ];
 
 export default function QuantizeControls({ params, detectedBPM, onChange }: Props) {
-  const noScroll = useNoScrollOnFocus();
-
   function set<K extends keyof QuantizeParams>(key: K, value: QuantizeParams[K]) {
     onChange({ ...params, [key]: value });
   }
@@ -54,13 +52,11 @@ export default function QuantizeControls({ params, detectedBPM, onChange }: Prop
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <input
-              type="range"
+            <Slider
               min={40} max={240} step={0.5}
               value={params.bpm}
-              onChange={e => set("bpm", parseFloat(e.target.value))}
-              {...noScroll}
-              className="flex-1 accent-[color:var(--color-accent)] h-1.5 rounded-full cursor-pointer"
+              onChange={v => set("bpm", v)}
+              className="flex-1"
             />
             <button
               onClick={() => set("bpm", detectedBPM)}
@@ -123,15 +119,13 @@ export default function QuantizeControls({ params, detectedBPM, onChange }: Prop
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <input
-              type="range"
+            <Slider
               min={-(60 / params.bpm)}
-              max={ (60 / params.bpm)}
+              max={60 / params.bpm}
               step={0.001}
               value={params.beatOffset}
-              onChange={e => set("beatOffset", parseFloat(e.target.value))}
-              {...noScroll}
-              className="flex-1 accent-[color:var(--color-accent)] h-1.5 rounded-full cursor-pointer"
+              onChange={v => set("beatOffset", v)}
+              className="flex-1"
             />
             <button
               onClick={() => set("beatOffset", 0)}
@@ -148,13 +142,10 @@ export default function QuantizeControls({ params, detectedBPM, onChange }: Prop
             <span className="text-slate-300">Strength</span>
             <span className="text-accent font-mono">{Math.round(params.strength * 100)}%</span>
           </div>
-          <input
-            type="range"
+          <Slider
             min={0} max={1} step={0.01}
             value={params.strength}
-            onChange={e => set("strength", parseFloat(e.target.value))}
-            {...noScroll}
-            className="w-full accent-[color:var(--color-accent)] h-1.5 rounded-full cursor-pointer"
+            onChange={v => set("strength", v)}
           />
         </div>
 
