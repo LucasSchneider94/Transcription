@@ -37,7 +37,7 @@ export default function ProportionalScoreViewer({ notes, duration }: Props) {
       )}
       <div
         ref={containerRef}
-        className="rounded-xl bg-[#16161f] overflow-x-hidden overflow-y-auto max-h-[80vh] p-2"
+        className="rounded-xl bg-white overflow-x-hidden overflow-y-auto max-h-[80vh] p-2 [&_svg]:text-black [&_text]:fill-black [&_path]:stroke-black"
       />
       <p className="text-xs text-muted">
         Note values inferred by clustering actual durations · barlines are layout only

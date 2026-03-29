@@ -34,20 +34,29 @@ export default function PianoRollViewer({ result }: Props) {
     canvas.width  = totalWidth;
     canvas.height = totalHeight;
 
+    // Read palette from CSS custom properties so it stays in sync with globals.css
+    const style = getComputedStyle(document.documentElement);
+    const clrBg           = style.getPropertyValue("--roll-bg").trim()           || "#0d0d0d";
+    const clrStripeBlack  = style.getPropertyValue("--roll-stripe-black").trim() || "#131313";
+    const clrStripeWhite  = style.getPropertyValue("--roll-stripe-white").trim() || "#181818";
+    const clrGrid         = style.getPropertyValue("--roll-grid").trim()         || "#232323";
+    const clrNoteWhite    = style.getPropertyValue("--roll-note-white").trim()   || "#c8922d";
+    const clrNoteBlack    = style.getPropertyValue("--roll-note-black").trim()   || "#a87030";
+
     // background
-    ctx.fillStyle = "#0f0f13";
+    ctx.fillStyle = clrBg;
     ctx.fillRect(0, 0, totalWidth, totalHeight);
 
     // horizontal key stripes
     for (let i = 0; i < N_KEYS; i++) {
       const pitch = PITCH_MAX - i;
       const y = i * ROW_H;
-      ctx.fillStyle = isBlack(pitch) ? "#14141c" : "#1a1a24";
+      ctx.fillStyle = isBlack(pitch) ? clrStripeBlack : clrStripeWhite;
       ctx.fillRect(0, y, totalWidth, ROW_H);
     }
 
     // second grid lines
-    ctx.strokeStyle = "#2a2a3a";
+    ctx.strokeStyle = clrGrid;
     ctx.lineWidth = 0.5;
     for (let s = 0; s <= result.duration; s++) {
       const x = s * PX_PER_S;
@@ -86,7 +95,7 @@ export default function PianoRollViewer({ result }: Props) {
       const y   = row * ROW_H + 1;
       const h   = ROW_H - 2;
 
-      ctx.fillStyle = isBlack(note.pitch) ? "#a89df9" : "#7c6af7";
+      ctx.fillStyle = isBlack(note.pitch) ? clrNoteBlack : clrNoteWhite;
       ctx.beginPath();
       ctx.roundRect(x, y, w, h, 2);
       ctx.fill();
@@ -110,8 +119,8 @@ export default function PianoRollViewer({ result }: Props) {
                   top: i * ROW_H,
                   height: ROW_H,
                   width: "100%",
-                  backgroundColor: isBlack(pitch) ? "#111" : "#1e1e2e",
-                  borderRight: "2px solid #2a2a3a",
+                  backgroundColor: isBlack(pitch) ? "var(--roll-stripe-black)" : "var(--roll-stripe-white)",
+                  borderRight: "2px solid var(--color-border)",
                   color: "#6b7280",
                 }}
               >

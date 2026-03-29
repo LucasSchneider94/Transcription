@@ -8,12 +8,17 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        background: "#0f0f13",
-        surface: "#1a1a24",
-        border: "#2a2a3a",
-        accent: "#02523a",
-        "accent-light": "#018250",
-        muted: "#6b7280",
+        // All values mirror the CSS custom properties in globals.css.
+        // Change the palette there; Tailwind picks it up via var().
+        background:      "var(--color-bg)",
+        surface:         "var(--color-surface)",
+        surface2:        "var(--color-surface2)",
+        border:          "var(--color-border)",
+        "border-strong": "var(--color-border-strong)",
+        accent:          "var(--color-accent)",
+        "accent-light":  "var(--color-accent-light)",
+        "accent-dim":    "var(--color-accent-dim)",
+        muted:           "var(--color-muted)",
       },
     },
   },

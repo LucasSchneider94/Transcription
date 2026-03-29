@@ -22,7 +22,7 @@ export default function SheetMusicViewer({ notes }: Props) {
         const osmd = new OpenSheetMusicDisplay(containerRef.current!, {
           autoResize: true,
           backend: "svg",
-          darkMode: true,
+          darkMode: false,
           drawTitle: false,
         });
         osmdRef.current = osmd;
@@ -35,7 +35,7 @@ export default function SheetMusicViewer({ notes }: Props) {
     <div className="space-y-2">
       <div
         ref={containerRef}
-        className="bg-[#16161f] rounded-xl p-4 min-h-[200px] overflow-x-auto"
+        className="bg-white rounded-xl p-4 min-h-[200px] overflow-x-auto"
       />
       <p className="text-xs text-muted">
         Sheet music quantised to a 16th-note grid at 120 bpm · ties used for long notes · review before exporting.

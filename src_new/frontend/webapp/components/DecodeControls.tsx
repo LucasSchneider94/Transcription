@@ -50,8 +50,8 @@ export default function DecodeControls({ params, onChange }: Props) {
                 type="range"
                 min={min} max={max} step={step}
                 value={val}
-                onChange={(e) => set(key, parseFloat(e.target.value) as DecodeParams[K])}
-                className="w-full accent-[#7c6af7] h-1.5 rounded-full cursor-pointer"
+                onChange={(e) => set(key, parseFloat(e.target.value) as DecodeParams[typeof key])}
+                className="w-full accent-[color:var(--color-accent)] h-1.5 rounded-full cursor-pointer"
               />
             </div>
           );
