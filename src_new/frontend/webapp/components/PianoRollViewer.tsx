@@ -57,16 +57,35 @@ export default function PianoRollViewer({ result }: Props) {
       ctx.stroke();
     }
 
-    // notes
+    // Truncate each note at the next onset on the same pitch so re-strikes
+    // are visible as a gap rather than a seamless continuation.
+    const GAP_S = 4 / PX_PER_S; // 4 px gap regardless of zoom
+    const byPitch = new Map<number, typeof result.notes>();
     for (const note of result.notes) {
-      if (note.pitch < PITCH_MIN || note.pitch > PITCH_MAX) continue;
-      const row   = PITCH_MAX - note.pitch;
-      const x     = note.start * PX_PER_S;
-      const w     = Math.max(2, (note.end - note.start) * PX_PER_S - 1);
-      const y     = row * ROW_H + 1;
-      const h     = ROW_H - 2;
+      if (!byPitch.has(note.pitch)) byPitch.set(note.pitch, []);
+      byPitch.get(note.pitch)!.push(note);
+    }
+    const truncated: { pitch: number; start: number; end: number }[] = [];
+    for (const [, group] of byPitch) {
+      const sorted = [...group].sort((a, b) => a.start - b.start);
+      for (let i = 0; i < sorted.length; i++) {
+        const next = sorted[i + 1];
+        const end = next
+          ? Math.min(sorted[i].end, next.start - GAP_S)
+          : sorted[i].end;
+        truncated.push({ pitch: sorted[i].pitch, start: sorted[i].start, end });
+      }
+    }
 
-      // rounded note rect
+    // notes
+    for (const note of truncated) {
+      if (note.pitch < PITCH_MIN || note.pitch > PITCH_MAX) continue;
+      const row = PITCH_MAX - note.pitch;
+      const x   = note.start * PX_PER_S;
+      const w   = Math.max(2, (note.end - note.start) * PX_PER_S - 1);
+      const y   = row * ROW_H + 1;
+      const h   = ROW_H - 2;
+
       ctx.fillStyle = isBlack(note.pitch) ? "#a89df9" : "#7c6af7";
       ctx.beginPath();
       ctx.roundRect(x, y, w, h, 2);

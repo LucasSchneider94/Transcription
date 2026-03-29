@@ -188,36 +188,42 @@ def _decode_notes(onset_prob: np.ndarray, frame_prob: np.ndarray,
     T, num_keys = onset_bin.shape
     MIDI_A0 = 21
 
+    # Refractory window: suppress re-triggering within this many frames of onset
+    REFRACTORY = int(fps * 0.05)  # 50 ms
+
     for k in range(num_keys):
         pitch      = k + MIDI_A0
         active     = False
         note_start = 0
 
-        for t in range(T):
-            triggered = onset_bin[max(0, t - 1):t + 2, k].any()
-            if not active and triggered:
-                active     = True
-                note_start = t
-            elif apply_gating and active and not frame_bin[t, k]:
-                dur = (t - note_start) / fps
-                if dur >= 0.05:
-                    notes.append({
-                        "pitch": pitch, "midi_note": pitch,
-                        "start": round(note_start / fps, 4),
-                        "end":   round(t / fps, 4),
-                        "note_name": _midi_to_name(pitch),
-                    })
-                active = False
-
-        if active:
-            dur = (T - note_start) / fps
+        def _emit(end_t: int) -> None:
+            dur = (end_t - note_start) / fps
             if dur >= 0.05:
                 notes.append({
                     "pitch": pitch, "midi_note": pitch,
                     "start": round(note_start / fps, 4),
-                    "end":   round(T / fps, 4),
+                    "end":   round(end_t / fps, 4),
                     "note_name": _midi_to_name(pitch),
                 })
+
+        for t in range(T):
+            is_onset = onset_bin[max(0, t - 1):t + 2, k].any()
+
+            if not active:
+                if is_onset:
+                    active     = True
+                    note_start = t
+            else:
+                # Re-strike: new onset after the refractory window → end + restart
+                if is_onset and t >= note_start + REFRACTORY:
+                    _emit(t)
+                    note_start = t  # restart; active stays True
+                elif apply_gating and not frame_bin[t, k]:
+                    _emit(t)
+                    active = False
+
+        if active:
+            _emit(T)
 
     notes.sort(key=lambda n: n["start"])
     return notes
