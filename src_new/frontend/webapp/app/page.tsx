@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useMemo } from "react";
 import AudioDropzone from "@/components/AudioDropzone";
 import TimeRangeSelector from "@/components/TimeRangeSelector";
 import PianoRollViewer from "@/components/PianoRollViewer";
 import ProportionalScoreViewer from "@/components/ProportionalScoreViewer";
+import DecodeControls from "@/components/DecodeControls";
+import { decodeNotes, DEFAULT_DECODE_PARAMS, type DecodeParams } from "@/lib/decode";
 import { Music2, Loader2 } from "lucide-react";
 
 export type Note = {
@@ -35,6 +37,7 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("piano_roll");
+  const [decodeParams, setDecodeParams] = useState<DecodeParams>(DEFAULT_DECODE_PARAMS);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   function handleFileAccepted(f: File, duration: number) {
@@ -71,6 +74,16 @@ export default function Home() {
       setLoading(false);
     }
   }
+
+  // Re-decode client-side on every param change — no server round-trip
+  const decodedNotes = useMemo(() => {
+    if (!result) return [];
+    return decodeNotes(result.onset_roll, result.piano_roll, result.fps, decodeParams);
+  }, [result, decodeParams]);
+
+  const displayResult = result
+    ? { ...result, notes: decodedNotes }
+    : null;
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-10 space-y-8">
@@ -132,36 +145,41 @@ export default function Home() {
       )}
 
       {/* Results */}
-      {result && (
-        <section className="bg-surface border border-border rounded-2xl p-6 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-widest text-muted">3 · Result</h2>
-            <div className="flex gap-2">
-              {(["piano_roll", "score"] as ViewMode[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setViewMode(m)}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
-                    ${viewMode === m
-                      ? "bg-accent text-white"
-                      : "bg-border text-muted hover:text-slate-200"}`}
-                >
-                  {m === "piano_roll" ? "Piano Roll" : "Score"}
-                </button>
-              ))}
+      {displayResult && (
+        <>
+          {/* Decoding controls */}
+          <DecodeControls params={decodeParams} onChange={setDecodeParams} />
+
+          <section className="bg-surface border border-border rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-widest text-muted">3 · Result</h2>
+              <div className="flex gap-2">
+                {(["piano_roll", "score"] as ViewMode[]).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setViewMode(m)}
+                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
+                      ${viewMode === m
+                        ? "bg-accent text-white"
+                        : "bg-border text-muted hover:text-slate-200"}`}
+                  >
+                    {m === "piano_roll" ? "Piano Roll" : "Score"}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
 
-          <p className="text-xs text-muted">
-            {result.notes.length} notes detected · {result.duration.toFixed(2)} s · {result.fps.toFixed(2)} fps
-          </p>
+            <p className="text-xs text-muted">
+              {displayResult.notes.length} notes · {displayResult.duration.toFixed(2)} s · {displayResult.fps.toFixed(2)} fps
+            </p>
 
-          {viewMode === "piano_roll" ? (
-            <PianoRollViewer result={result} />
-          ) : (
-            <ProportionalScoreViewer notes={result.notes} duration={result.duration} />
-          )}
-        </section>
+            {viewMode === "piano_roll" ? (
+              <PianoRollViewer result={displayResult} />
+            ) : (
+              <ProportionalScoreViewer notes={displayResult.notes} duration={displayResult.duration} />
+            )}
+          </section>
+        </>
       )}
 
       {/* hidden audio element for duration probing */}
