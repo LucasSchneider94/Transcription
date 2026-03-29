@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import type { AnalysisResult } from "@/app/page";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { AnalysisResult, Note } from "@/app/page";
 import type { BeatGrid } from "@/lib/quantize";
+import LinearScoreViewer, { LINEAR_SCORE_H } from "@/components/LinearScoreViewer";
 
 type Props = {
-  result:             AnalysisResult;
-  beatGrid?:          BeatGrid;
-  barTimes?:          number[];
-  onBarTimesChange?:  (times: number[]) => void;
+  result:                AnalysisResult;
+  beatGrid?:             BeatGrid;
+  barTimes?:             number[];
+  onBarTimesChange?:     (times: number[]) => void;
+  timeSigNum?:           number;
+  timeSigDen?:           number;
+  onRegisterMidiExport?: (fn: () => void) => void;
 };
 
 const PITCH_MIN = 21;   // A0
@@ -23,13 +27,108 @@ function isBlack(pitch: number) {
   return BLACK_KEYS.has(pitch % 12);
 }
 
-export default function PianoRollViewer({ result, beatGrid, barTimes, onBarTimesChange }: Props) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [scrollX, setScrollX] = useState(0);
+export default function PianoRollViewer({
+  result, beatGrid, barTimes, onBarTimesChange,
+  timeSigNum = 4, timeSigDen = 4, onRegisterMidiExport,
+}: Props) {
+  const canvasRef     = useRef<HTMLCanvasElement>(null);
+  const containerRef  = useRef<HTMLDivElement>(null);
+  const [scrollX, setScrollX]       = useState(0);
+  const [editNotes, setEditNotes]   = useState<Note[]>(() => result.notes);
+  const [selected, setSelected]     = useState<number | null>(null);
+
+  // Sync editNotes when upstream notes change (new result / re-quantize)
+  useEffect(() => {
+    setEditNotes(result.notes);
+    setSelected(null);
+  }, [result.notes]);
+
+  // Register MIDI export callback with parent — uses editNotes so edits are exported
+  useEffect(() => {
+    onRegisterMidiExport?.(() => exportMidi(editNotes, timeSigNum, timeSigDen));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editNotes, timeSigNum, timeSigDen]);
 
   const totalWidth  = Math.ceil(result.duration * PX_PER_S);
   const totalHeight = N_KEYS * ROW_H;
+
+  // ─── edit helpers ───────────────────────────────────────────────────────────
+  const updateNote = useCallback((idx: number, patch: Partial<Note>) => {
+    setEditNotes(prev => {
+      const next = [...prev];
+      next[idx]  = { ...next[idx], ...patch };
+      return next;
+    });
+  }, []);
+
+  const deleteNote = useCallback((idx: number) => {
+    setEditNotes(prev => prev.filter((_, i) => i !== idx));
+    setSelected(null);
+  }, []);
+
+  const snapToGrid = useCallback((t: number): number => {
+    const subs = beatGrid?.subs;
+    if (!subs || subs.length < 2) return t;
+    let best = t, minD = Infinity;
+    for (const s of subs) {
+      const d = Math.abs(s - t);
+      if (d < minD) { minD = d; best = s; }
+      if (s > t + 1) break;
+    }
+    return best;
+  }, [beatGrid]);
+
+  // Keyboard handler — attached to outer container
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (selected === null) return;
+    const note   = editNotes[selected];
+    const subs   = beatGrid?.subs;
+    const step   = subs && subs.length >= 2 ? subs[1] - subs[0] : 0.0625;
+    switch (e.key) {
+      case "ArrowLeft":
+        e.preventDefault();
+        updateNote(selected, { start: Math.max(0, note.start - step), end: Math.max(step * 2, note.end - step) });
+        break;
+      case "ArrowRight":
+        e.preventDefault();
+        updateNote(selected, { start: note.start + step, end: note.end + step });
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        updateNote(selected, { end: note.end + step });
+        break;
+      case "ArrowDown":
+        e.preventDefault();
+        updateNote(selected, { end: Math.max(note.start + step, note.end - step) });
+        break;
+      case "Delete":
+      case "Backspace":
+        e.preventDefault();
+        deleteNote(selected);
+        break;
+    }
+  }, [selected, editNotes, beatGrid, updateNote, deleteNote]);
+
+  // Pre-compute display ends (gap between consecutive same-pitch notes)
+  const GAP_S = 4 / PX_PER_S;
+  const displayEnds = useMemo(() => {
+    const byPitch = new Map<number, { idx: number; start: number; end: number }[]>();
+    editNotes.forEach((n, idx) => {
+      if (!byPitch.has(n.pitch)) byPitch.set(n.pitch, []);
+      byPitch.get(n.pitch)!.push({ idx, start: n.start, end: n.end });
+    });
+    const out = new Map<number, number>(); // idx → display end
+    for (const [, group] of byPitch) {
+      const sorted = [...group].sort((a, b) => a.start - b.start);
+      for (let i = 0; i < sorted.length; i++) {
+        const next = sorted[i + 1];
+        out.set(sorted[i].idx, next
+          ? Math.min(sorted[i].end, next.start - GAP_S)
+          : sorted[i].end);
+      }
+    }
+    return out;
+  }, [editNotes, GAP_S]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -93,56 +192,38 @@ export default function PianoRollViewer({ result, beatGrid, barTimes, onBarTimes
       }
     }
 
-    // Truncate each note at the next onset on the same pitch so re-strikes
-    // are visible as a gap rather than a seamless continuation.
-    const GAP_S = 4 / PX_PER_S; // 4 px gap regardless of zoom
-    const byPitch = new Map<number, typeof result.notes>();
-    for (const note of result.notes) {
-      if (!byPitch.has(note.pitch)) byPitch.set(note.pitch, []);
-      byPitch.get(note.pitch)!.push(note);
-    }
-    const truncated: { pitch: number; start: number; end: number }[] = [];
-    for (const [, group] of byPitch) {
-      const sorted = [...group].sort((a, b) => a.start - b.start);
-      for (let i = 0; i < sorted.length; i++) {
-        const next = sorted[i + 1];
-        const end = next
-          ? Math.min(sorted[i].end, next.start - GAP_S)
-          : sorted[i].end;
-        truncated.push({ pitch: sorted[i].pitch, start: sorted[i].start, end });
-      }
-    }
-
-    // notes
-    for (const note of truncated) {
-      if (note.pitch < PITCH_MIN || note.pitch > PITCH_MAX) continue;
-      const row = PITCH_MAX - note.pitch;
-      const x   = note.start * PX_PER_S;
-      const w   = Math.max(2, (note.end - note.start) * PX_PER_S - 1);
-      const y   = row * ROW_H + 1;
-      const h   = ROW_H - 2;
-
-      ctx.fillStyle = isBlack(note.pitch) ? clrNoteBlack : clrNoteWhite;
-      ctx.beginPath();
-      ctx.roundRect(x, y, w, h, 2);
-      ctx.fill();
-    }
+    // Notes are rendered as DOM overlay divs — canvas only draws background/grid
   }, [result, totalWidth, totalHeight, beatGrid]);
 
   return (
-    <div className="space-y-2">
+    <div
+      className="space-y-2"
+      tabIndex={-1}
+      onKeyDown={handleKeyDown}
+      style={{ outline: "none" }}
+    >
       {/* keyboard labels on left, scroll in sync */}
       <div className="flex">
-        {/* piano keyboard strip */}
-        <div className="flex-shrink-0 w-10 relative" style={{ height: totalHeight }}>
-          {Array.from({ length: N_KEYS }, (_, i) => {
-            const pitch = PITCH_MAX - i;
-            const label = pitch % 12 === 0 ? `C${Math.floor(pitch / 12) - 1}` : "";
-            return (
-              <div
-                key={pitch}
-                className="absolute right-0 flex items-center justify-end pr-1 text-[9px]"
-                style={{
+        {/* left strip: clef labels + piano keys */}
+        <div className="flex-shrink-0 w-10">
+          {/* clef placeholder — must match LINEAR_SCORE_H */}
+          <div
+            style={{ height: LINEAR_SCORE_H }}
+            className="bg-white border-r border-gray-300 flex flex-col justify-around items-center select-none"
+          >
+            <span style={{ fontSize: 28, lineHeight: 1, color: "#333" }}>𝄞</span>
+            <span style={{ fontSize: 28, lineHeight: 1, color: "#333" }}>𝄢</span>
+          </div>
+          {/* piano keyboard strip */}
+          <div className="relative" style={{ height: totalHeight }}>
+            {Array.from({ length: N_KEYS }, (_, i) => {
+              const pitch = PITCH_MAX - i;
+              const label = pitch % 12 === 0 ? `C${Math.floor(pitch / 12) - 1}` : "";
+              return (
+                <div
+                  key={pitch}
+                  className="absolute right-0 flex items-center justify-end pr-1 text-[9px]"
+                  style={{
                   top: i * ROW_H,
                   height: ROW_H,
                   width: "100%",
@@ -155,39 +236,80 @@ export default function PianoRollViewer({ result, beatGrid, barTimes, onBarTimes
               </div>
             );
           })}
+          </div>
         </div>
 
-        {/* scrollable canvas + draggable barlines */}
+        {/* scrollable canvas + (optional) aligned score above */}
         <div
           ref={containerRef}
           className="overflow-x-auto flex-1 rounded-lg"
           onScroll={(e) => setScrollX((e.target as HTMLDivElement).scrollLeft)}
         >
-          <div className="relative" style={{ width: totalWidth, height: totalHeight }}>
-            <canvas
-              ref={canvasRef}
-              style={{ display: "block", position: "absolute", top: 0, left: 0, imageRendering: "pixelated" }}
+          <div style={{ width: totalWidth }}>
+            {/* Linear score strip — always visible, shares scroll */}
+            <LinearScoreViewer
+              notes={result.notes}
+              barTimes={barTimes ?? []}
+              timeSigNum={timeSigNum}
+              timeSigDen={timeSigDen}
+              totalWidth={totalWidth}
             />
-            {barTimes?.map((t, i) => (
-              <BarHandle
-                key={i}
-                time={Math.max(0, Math.min(result.duration, t))}
-                height={totalHeight}
-                isFirst={i === 0}
-                onDrag={newTime => {
-                  if (!onBarTimesChange) return;
-                  const updated = [...barTimes];
-                  updated[i] = Math.max(0, Math.min(result.duration, newTime));
-                  onBarTimesChange(updated);
-                }}
+
+            {/* Piano roll canvas + note overlay + draggable barlines */}
+            <div
+              className="relative"
+              style={{ width: totalWidth, height: totalHeight }}
+              onClick={() => setSelected(null)}
+            >
+              <canvas
+                ref={canvasRef}
+                style={{ display: "block", position: "absolute", top: 0, left: 0, imageRendering: "pixelated" }}
               />
-            ))}
+              {/* Note divs */}
+              {editNotes.map((note, idx) => {
+                if (note.pitch < PITCH_MIN || note.pitch > PITCH_MAX) return null;
+                return (
+                  <NoteBlock
+                    key={idx}
+                    note={note}
+                    displayEnd={displayEnds.get(idx) ?? note.end}
+                    isSelected={selected === idx}
+                    onSelect={() => setSelected(idx)}
+                    onMove={(newStart, newPitch) => {
+                      const dur = note.end - note.start;
+                      const snapped = snapToGrid(Math.max(0, newStart));
+                      const p = Math.max(PITCH_MIN, Math.min(PITCH_MAX, newPitch));
+                      updateNote(idx, { start: snapped, end: snapped + dur, pitch: p, midi_note: p });
+                    }}
+                    onResize={(newEnd) => {
+                      const snapped = snapToGrid(newEnd);
+                      updateNote(idx, { end: Math.max(note.start + 0.05, snapped) });
+                    }}
+                  />
+                );
+              })}
+              {barTimes?.map((t, i) => (
+                <BarHandle
+                  key={i}
+                  time={Math.max(0, Math.min(result.duration, t))}
+                  height={totalHeight}
+                  isFirst={i === 0}
+                  onDrag={newTime => {
+                    if (!onBarTimesChange) return;
+                    const updated = [...barTimes];
+                    updated[i] = Math.max(0, Math.min(result.duration, newTime));
+                    onBarTimesChange(updated);
+                  }}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </div>
 
       <p className="text-xs text-muted text-right">
-        Scroll horizontally to navigate · {result.notes.length} notes
+        Scroll horizontally to navigate · {editNotes.length} notes
+        {selected !== null && " · selected — ←/→ move, ↑/↓ lengthen/shorten, Del removes"}
       </p>
     </div>
   );
@@ -240,11 +362,184 @@ function BarHandle({
         style={{
           width:           isFirst ? 2 : 1.5,
           height:          "100%",
-          // amber for bar 1, green for others
-          backgroundColor: isFirst ? "rgba(250,176,5,0.9)" : "rgba(61,170,114,0.75)",
+          backgroundColor: isFirst ? "var(--color-accent-light)" : "var(--color-accent-cool)",
           pointerEvents:   "none",
         }}
       />
     </div>
   );
+}
+
+// ─── Note block (DOM, editable) ──────────────────────────────────────────────
+
+function NoteBlock({
+  note, displayEnd, isSelected, onSelect, onMove, onResize,
+}: {
+  note:        Note;
+  displayEnd:  number;
+  isSelected:  boolean;
+  onSelect:    () => void;
+  onMove:      (newStart: number, newPitch: number) => void;
+  onResize:    (newEnd: number) => void;
+}) {
+  const row = PITCH_MAX - note.pitch;
+  const x   = note.start * PX_PER_S;
+  const w   = Math.max(3, (displayEnd - note.start) * PX_PER_S - 1);
+  const y   = row * ROW_H + 1;
+  const h   = ROW_H - 2;
+
+  const clr = isSelected
+    ? "var(--note-highlight)"
+    : isBlack(note.pitch) ? "var(--roll-note-black)" : "var(--roll-note-white)";
+
+  function handleBodyMouseDown(e: React.MouseEvent) {
+    e.stopPropagation();
+    onSelect();
+    const startX     = e.clientX;
+    const startY     = e.clientY;
+    const startTime  = note.start;
+    const startPitch = note.pitch;
+
+    function onMove_(me: MouseEvent) {
+      const dt    = (me.clientX - startX) / PX_PER_S;
+      const dp    = -Math.round((me.clientY - startY) / ROW_H);
+      onMove(startTime + dt, startPitch + dp);
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove_);
+      window.removeEventListener("mouseup",   onUp);
+    }
+    window.addEventListener("mousemove", onMove_);
+    window.addEventListener("mouseup",   onUp);
+  }
+
+  function handleResizeMouseDown(e: React.MouseEvent) {
+    e.stopPropagation();
+    onSelect();
+    const startX   = e.clientX;
+    const startEnd = note.end;
+
+    function onMove_(me: MouseEvent) {
+      onResize(startEnd + (me.clientX - startX) / PX_PER_S);
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove_);
+      window.removeEventListener("mouseup",   onUp);
+    }
+    window.addEventListener("mousemove", onMove_);
+    window.addEventListener("mouseup",   onUp);
+  }
+
+  return (
+    <div
+      onMouseDown={handleBodyMouseDown}
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        position:        "absolute",
+        left:            x,
+        top:             y,
+        width:           w,
+        height:          h,
+        backgroundColor: clr,
+        borderRadius:    2,
+        cursor:          "grab",
+        boxSizing:       "border-box",
+        border:          isSelected ? "1px solid var(--note-highlight)" : "none",
+        zIndex:          5,
+      }}
+    >
+      {/* resize handle — right 5px */}
+      <div
+        onMouseDown={handleResizeMouseDown}
+        style={{
+          position:  "absolute",
+          right:     0,
+          top:       0,
+          width:     5,
+          height:    "100%",
+          cursor:    "ew-resize",
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── MIDI export ─────────────────────────────────────────────────────────────
+// Hand-rolled minimal Standard MIDI File (SMF format 0) writer.
+// No external library — keeps the bundle lean and avoids SSR issues.
+
+function writeMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number): Uint8Array {
+  const PPQ    = 480;   // pulses per quarter note
+  const TEMPO  = 500000; // microseconds per quarter note = 120 BPM default
+
+  function varLen(n: number): number[] {
+    const bytes: number[] = [];
+    bytes.unshift(n & 0x7f);
+    n >>= 7;
+    while (n > 0) { bytes.unshift((n & 0x7f) | 0x80); n >>= 7; }
+    return bytes;
+  }
+
+  function writeU32(n: number): number[] {
+    return [(n >> 24) & 0xff, (n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+  }
+
+  function writeU16(n: number): number[] {
+    return [(n >> 8) & 0xff, n & 0xff];
+  }
+
+  // Build events: [tick, ...bytes]
+  type Ev = [number, ...number[]];
+  const events: Ev[] = [];
+
+  // Tempo
+  events.push([0, 0xff, 0x51, 0x03, (TEMPO >> 16) & 0xff, (TEMPO >> 8) & 0xff, TEMPO & 0xff]);
+
+  // Time signature
+  const log2Den = Math.round(Math.log2(timeSigDen));
+  events.push([0, 0xff, 0x58, 0x04, timeSigNum, log2Den, 24, 8]);
+
+  for (const note of notes) {
+    const startTick = Math.round(note.start * PPQ * 2); // *2 because 120BPM → 0.5s/beat
+    const endTick   = Math.round(note.end   * PPQ * 2);
+    const vel = 80;
+    events.push([startTick, 0x90, note.midi_note & 0x7f, vel]);
+    events.push([endTick,   0x80, note.midi_note & 0x7f, 0]);
+  }
+
+  events.sort((a, b) => a[0] - b[0]);
+
+  // Convert to delta-time
+  const track: number[] = [];
+  let lastTick = 0;
+  for (const [tick, ...msg] of events) {
+    track.push(...varLen(tick - lastTick), ...msg);
+    lastTick = tick;
+  }
+  // End of track
+  track.push(...varLen(0), 0xff, 0x2f, 0x00);
+
+  const header = [
+    0x4d, 0x54, 0x68, 0x64,  // MThd
+    ...writeU32(6),            // chunk length
+    ...writeU16(0),            // format 0
+    ...writeU16(1),            // 1 track
+    ...writeU16(PPQ),          // PPQ
+    0x4d, 0x54, 0x72, 0x6b,  // MTrk
+    ...writeU32(track.length),
+    ...track,
+  ];
+
+  return new Uint8Array(header);
+}
+
+function exportMidi(notes: AnalysisResult["notes"], timeSigNum: number, timeSigDen: number) {
+  const data = writeMidi(notes, timeSigNum, timeSigDen);
+  const buf  = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+  const blob = new Blob([buf], { type: "audio/midi" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url; a.download = "transcription.mid";
+  a.click();
+  URL.revokeObjectURL(url);
 }

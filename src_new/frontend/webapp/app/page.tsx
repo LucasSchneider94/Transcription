@@ -4,12 +4,11 @@ import { useState, useRef, useMemo, useEffect } from "react";
 import AudioDropzone from "@/components/AudioDropzone";
 import TimeRangeSelector from "@/components/TimeRangeSelector";
 import PianoRollViewer from "@/components/PianoRollViewer";
-import ProportionalScoreViewer from "@/components/ProportionalScoreViewer";
 import DecodeControls from "@/components/DecodeControls";
 import QuantizeControls from "@/components/QuantizeControls";
 import { decodeNotes, DEFAULT_DECODE_PARAMS, type DecodeParams } from "@/lib/decode";
 import { quantizeNotes, quantizeNotesFromBarTimes, estimateBPM, buildBeatGrid, buildGridFromBarTimes, DEFAULT_QUANTIZE_PARAMS, type QuantizeParams, type BeatGrid } from "@/lib/quantize";
-import { Music2, Loader2 } from "lucide-react";
+import { Music2, Loader2, Download } from "lucide-react";
 
 export type Note = {
   pitch: number;
@@ -28,7 +27,7 @@ export type AnalysisResult = {
   notes: Note[];
 };
 
-type ViewMode = "piano_roll" | "score";
+type MidiExportFn = () => void;
 
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
@@ -38,11 +37,11 @@ export default function Home() {
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("piano_roll");
   const [decodeParams, setDecodeParams] = useState<DecodeParams>(DEFAULT_DECODE_PARAMS);
   const [quantizeParams, setQuantizeParams] = useState<QuantizeParams>(DEFAULT_QUANTIZE_PARAMS);
   const [barTimes, setBarTimes] = useState<number[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const midiExportRef = useRef<MidiExportFn | null>(null);
 
   function handleFileAccepted(f: File, duration: number) {
     setFile(f);
@@ -152,9 +151,9 @@ export default function Home() {
     <div className="max-w-6xl mx-auto px-6 py-10 space-y-8">
       {/* Header */}
       <div className="flex items-center gap-3">
-        <Music2 className="text-accent w-8 h-8" />
+        <Music2 className="ttext-2xl w-8 h-8" />
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Piano Transcription</h1>
+          <h1 className="text-6xl font-extralight tracking-tight">Automatic Piano Music Transcription</h1>
           <p className="text-muted text-sm">Upload a piano recording and get an AI-generated transcription.</p>
         </div>
       </div>
@@ -212,20 +211,13 @@ export default function Home() {
         <section className="bg-surface border border-border rounded-2xl p-6 space-y-5">
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold uppercase tracking-widest text-muted">3 · Result</h2>
-            <div className="flex gap-2">
-              {(["piano_roll", "score"] as ViewMode[]).map((m) => (
-                <button
-                  key={m}
-                  onClick={() => setViewMode(m)}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
-                    ${viewMode === m
-                      ? "bg-accent text-white"
-                      : "bg-border text-muted hover:text-slate-200"}`}
-                >
-                  {m === "piano_roll" ? "Piano Roll" : "Score"}
-                </button>
-              ))}
-            </div>
+            <button
+              onClick={() => midiExportRef.current?.()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-accent hover:bg-accent-light text-white transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Export MIDI
+            </button>
           </div>
 
           {/* Decode + Quantize controls — above viewer so they stay in frame */}
@@ -242,23 +234,15 @@ export default function Home() {
             {displayResult.notes.length} notes · {displayResult.duration.toFixed(2)} s · {displayResult.fps.toFixed(2)} fps
           </p>
 
-          {viewMode === "piano_roll" ? (
-            <PianoRollViewer
-              result={displayResult}
-              beatGrid={beatGrid}
-              barTimes={barTimes}
-              onBarTimesChange={setBarTimes}
-            />
-          ) : (
-            <ProportionalScoreViewer
-              notes={displayResult.notes}
-              duration={displayResult.duration}
-              bpm={quantizeParams.bpm}
-              beatOffset={quantizeParams.beatOffset}
-              timeSigNum={quantizeParams.timeSigNum}
-              timeSigDen={quantizeParams.timeSigDen}
-            />
-          )}
+          <PianoRollViewer
+            result={displayResult}
+            beatGrid={beatGrid}
+            barTimes={barTimes}
+            onBarTimesChange={setBarTimes}
+            timeSigNum={quantizeParams.timeSigNum}
+            timeSigDen={quantizeParams.timeSigDen}
+            onRegisterMidiExport={fn => { midiExportRef.current = fn; }}
+          />
         </section>
       )}
 

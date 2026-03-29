@@ -13,16 +13,24 @@
   ─────────────────────────────────────────────────────────────────────────────
 */
 :root {
+  /* ── App background gradient ─────────────────────────────────────────────
+     Inspired by a deep blue→indigo→rose-purple sweep.
+     Edit these two stops to change the gradient.                          */
+  --grad-start:        #370e27;   /* deep navy blue  — left edge  */
+  --grad-mid1:         #1F0C33;   /* dark indigo — middle */
+  --grad-mid2:         #14143b;   /* dark rose-purple — middle */
+  --grad-end:          #18225b;   /* dark rose-purple — right edge */
+
   /* backgrounds */
-  --color-bg:          #090909;
-  --color-surface:     #0f1316;
+  --color-bg:          #0b000d;
+  --color-surface:     #120411c7;
   --color-surface2:    #1f1f1f;
 
   /* borders */
   --color-border:      #262626;
   --color-border-strong: #4c4c4c;
 
-  /* accent — green gradient (warm soft green → teal) */
+  /* accent*/
   --color-accent:      #ae1751;   /* primary interactive */
   --color-accent-light: #e91e63;  /* hover / lighter variant */
   --color-accent-cool: #9c2780;   /* end of gradient */
@@ -34,17 +42,20 @@
 
   /* piano roll canvas */
   --roll-bg:           #0b0b0b;
-  --roll-stripe-black: #0c110c;
-  --roll-stripe-white: #101316;
+  --roll-stripe-black: #100910;
+  --roll-stripe-white: #18101b;
   --roll-grid:         #1f1f1f;
-  --roll-beat:         #276880;  /* quarter-note beat lines */
+  --roll-beat:         #572780;  /* quarter-note beat lines */
   --roll-bar:          #572780;  /* bar lines */
-  --roll-note-white:   #57acdc;   
-  --roll-note-black:   #57acdc;   
+  --roll-note-white:   #276880;
+  --roll-note-black:   #276880;
+  --note-highlight:   #57acdc;
 }
 
 body {
-  background-color: var(--color-bg);
+  background: linear-gradient(135deg, var(--grad-start) 0%, var(--grad-mid1) 30%, var(--grad-mid2) 70%, var(--grad-end) 100%);
+  background-attachment: fixed;
+  min-height: 100vh;
   color: var(--color-text);
   font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
 }
