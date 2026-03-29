@@ -192,19 +192,51 @@ def sweep_thresholds(
 # Data loading helpers
 # ---------------------------------------------------------------------------
 
-def _compute_pos_weights(dataset: PianoTranscriptionDataset, max_batches: int = 20):
-    """Estimate onset/frame positive-class weights from a small data sample."""
-    onset_pos = onset_neg = frame_pos = frame_neg = 1e-8  # avoid div-by-zero
-    loader = DataLoader(dataset, batch_size=4, shuffle=False, num_workers=0)
-    for i, batch in enumerate(loader):
-        if i >= max_batches:
-            break
-        o = batch["onset"].numpy()
-        f = batch["frame"].numpy()
-        onset_pos += o.sum()
-        onset_neg += (1 - o).sum()
-        frame_pos += f.sum()
-        frame_neg += (1 - f).sum()
+class FileGroupedSampler(torch.utils.data.Sampler):
+    """Yields indices so that all snippets from the same file are consecutive.
+
+    This is the key to efficient data loading: combined with the dataset's
+    LRU file cache, it means each file is loaded from disk exactly once per
+    epoch regardless of how many snippets are drawn from it.
+
+    File order is reshuffled every epoch; call set_epoch(e) before each epoch.
+    """
+
+    def __init__(self, dataset: PianoTranscriptionDataset, shuffle_files: bool = True, seed: int = 42):
+        self.dataset       = dataset
+        self.shuffle_files = shuffle_files
+        self.seed          = seed
+        self._epoch        = 0
+
+    def set_epoch(self, epoch: int):
+        self._epoch = epoch
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __iter__(self):
+        n_files    = self.dataset.num_files
+        n_per_file = self.dataset.snippets_per_file
+        file_order = list(range(n_files))
+        if self.shuffle_files:
+            rng = np.random.default_rng(self.seed + self._epoch)
+            rng.shuffle(file_order)
+        for file_idx in file_order:
+            base = file_idx * n_per_file
+            yield from range(base, base + n_per_file)
+
+
+def _compute_pos_weights(dataset: PianoTranscriptionDataset, max_files: int = 10):
+    """Estimate onset/frame positive-class weights from a few files directly.
+    Reads only onset/frame arrays (not spectrograms) for speed.
+    """
+    onset_pos = onset_neg = frame_pos = frame_neg = 1e-8
+    for path in dataset.files[:max_files]:
+        with np.load(path) as data:
+            o = data["onset"].astype(np.float32)
+            f = data["frame"].astype(np.float32)
+        onset_pos += o.sum();  onset_neg += (1 - o).sum()
+        frame_pos += f.sum();  frame_neg += (1 - f).sum()
     return onset_neg / onset_pos, frame_neg / frame_pos
 
 
@@ -217,9 +249,8 @@ def build_file_splits(config: dict):
     with open(json_path) as fh:
         maestro = json.load(fh)
 
-    # MAESTRO v3 JSON is a dict-of-dicts keyed by string integers
-    af_map  = maestro["audio_filename"]   # {"0": "2018/...", ...}
-    spl_map = maestro["split"]            # {"0": "train", ...}
+    af_map  = maestro["audio_filename"]
+    spl_map = maestro["split"]
 
     train_stems, val_stems = set(), set()
     for k in af_map:
@@ -230,9 +261,7 @@ def build_file_splits(config: dict):
             val_stems.add(stem)
 
     data_dir = config["data_dir"]
-    all_npz = sorted(
-        f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz")
-    )
+    all_npz  = sorted(f for f in os.listdir(data_dir) if f.endswith("_piano_roll_with_pedals.npz"))
     train_paths, val_paths = [], []
     for npz in all_npz:
         stem = npz.replace("_piano_roll_with_pedals.npz", "").lower()
@@ -241,15 +270,18 @@ def build_file_splits(config: dict):
             train_paths.append(path)
         elif stem in val_stems:
             val_paths.append(path)
-
     return train_paths, val_paths
 
 
-def _compute_norm_stats(paths: list) -> dict:
-    """Global mean/std over up to 50 spectrograms (fast approximate)."""
+def _compute_norm_stats(paths: list, max_files: int = 20, stride: int = 50) -> dict:
+    """Fast global mean/std by sampling every `stride`-th frame from each file.
+    Reads max_files files; at stride=50 each 62k-frame file contributes ~1250
+    frames — fast enough to finish in seconds.
+    """
     s = s2 = n = 0.0
-    for p in paths[:50]:
-        spec = np.load(p)["spectrogram"].astype(np.float64)
+    for p in paths[:max_files]:
+        with np.load(p) as data:
+            spec = data["spectrogram"][:, ::stride].astype(np.float64)
         s  += spec.sum()
         s2 += (spec ** 2).sum()
         n  += spec.size
@@ -261,7 +293,7 @@ def _compute_norm_stats(paths: list) -> dict:
 def create_dataloaders(config: dict):
     """Build train and val DataLoaders. Returns (train_loader, val_loader, norm_stats)."""
     data_dir = config["data_dir"]
-    overfit = config.get("overfit_mode", False)
+    overfit  = config.get("overfit_mode", False)
 
     if overfit:
         n = config.get("overfit_num_files", 2)
@@ -282,7 +314,9 @@ def create_dataloaders(config: dict):
     if not train_paths:
         raise RuntimeError(f"No training files found in {data_dir}")
 
+    print("Computing normalization stats...", end=" ", flush=True)
     norm_stats = _compute_norm_stats(train_paths)
+    print(f"mean={norm_stats['mean']:.2f}  std={norm_stats['std']:.2f}")
 
     common = dict(
         data_dir=data_dir,
@@ -305,31 +339,27 @@ def create_dataloaders(config: dict):
         file_list=[os.path.basename(p) for p in val_paths],
         file_indices=list(range(len(val_paths))),
         seed=config.get("deterministic_seed", 42) + 1,
-        fixed_snippets=True,   # validation is always deterministic
+        fixed_snippets=True,
         **common,
     )
 
-    nw = config.get("num_workers", 0)
-    pin = config.get("pin_memory", False)
-    persist = nw > 0 and config.get("persistent_workers", False)
-
-    train_loader = DataLoader(
+    # FileGroupedSampler ensures all snippets from the same file are consecutive
+    # so the LRU file cache in __getitem__ gives exactly 1 disk read per file.
+    # num_workers MUST be 0 — worker processes have separate memory and cannot
+    # share the file cache.
+    train_sampler = FileGroupedSampler(
         train_ds,
-        batch_size=config["batch_size"],
-        shuffle=config.get("shuffle_train", True),
-        num_workers=nw,
-        pin_memory=pin,
-        persistent_workers=persist,
+        shuffle_files=config.get("shuffle_train", True),
+        seed=config.get("deterministic_seed", 42),
     )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=config["batch_size"],
-        shuffle=False,
-        num_workers=nw,
-        pin_memory=pin,
-        persistent_workers=persist,
-    )
-    return train_loader, val_loader, norm_stats
+    val_sampler = FileGroupedSampler(val_ds, shuffle_files=False)
+
+    batch = config["batch_size"]
+    train_loader = DataLoader(train_ds, batch_size=batch, sampler=train_sampler,
+                              num_workers=0, pin_memory=False)
+    val_loader   = DataLoader(val_ds,   batch_size=batch, sampler=val_sampler,
+                              num_workers=0, pin_memory=False)
+    return train_loader, val_loader, norm_stats, train_sampler
 
 
 # ---------------------------------------------------------------------------
@@ -494,6 +524,8 @@ def run_epoch(
     n_batches  = 0
     onset_p_list, onset_g_list = [], []
     frame_p_list, frame_g_list = [], []
+    t_epoch_start = time.time()
+    log_interval  = max(1, len(loader) // 5)   # print ~5 times per epoch
 
     for batch in loader:
         spec  = batch["spectrogram"].to(device).unsqueeze(1)  # (B,1,F,T)
@@ -524,6 +556,13 @@ def run_epoch(
 
         total_loss += loss.item()
         n_batches  += 1
+
+        if is_train and n_batches % log_interval == 0:
+            elapsed = time.time() - t_epoch_start
+            phase = "train"
+            print(f"  [{phase}] {n_batches}/{len(loader)} batches  "
+                  f"loss={total_loss/n_batches:.4f}  {elapsed:.0f}s elapsed",
+                  flush=True)
 
         if n_batches <= max_collect:
             onset_p_list.append(torch.sigmoid(preds["onset"]).detach().cpu().numpy())
@@ -571,7 +610,7 @@ def get_active_config(use_overfit: bool) -> dict:
 # Main training loop
 # ---------------------------------------------------------------------------
 
-def train(config: dict):
+def train(config: dict, resume_checkpoint: str | None = None):
     # Seed
     seed = config.get("deterministic_seed", 42)
     torch.manual_seed(seed)
@@ -593,7 +632,7 @@ def train(config: dict):
 
     # Data
     print("Building dataloaders...")
-    train_loader, val_loader, norm_stats = create_dataloaders(config)
+    train_loader, val_loader, norm_stats, train_sampler = create_dataloaders(config)
     save_json(norm_stats, os.path.join(run_dir, "normalization_stats.json"))
     print(f"  train batches: {len(train_loader)},  val batches: {len(val_loader)}")
 
@@ -616,6 +655,20 @@ def train(config: dict):
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
 
+    if resume_checkpoint:
+        ckpt_path = resume_checkpoint if os.path.isabs(resume_checkpoint) \
+                    else os.path.join(script_dir, resume_checkpoint)
+        print(f"Loading weights from: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        state = ckpt.get("model_state_dict", ckpt)
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            print(f"  [resume] missing keys: {missing}")
+        if unexpected:
+            print(f"  [resume] unexpected keys: {unexpected}")
+        print(f"  Weights loaded. Starting fresh optimizer at lr={config['learning_rate']:.1e}")
+        config["resumed_from"] = ckpt_path
+
     loss_fn   = OnsetFrameLoss(config, onset_pos_weight=onset_pw, frame_pos_weight=frame_pw)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -631,6 +684,8 @@ def train(config: dict):
             factor=config.get("scheduler_factor", 0.5),
             patience=config.get("scheduler_patience", 8),
             min_lr=config.get("scheduler_min_lr", 1e-7),
+            threshold=config.get("scheduler_threshold", 1e-4),
+            threshold_mode=config.get("scheduler_threshold_mode", "rel"),
         )
 
     scaler = None
@@ -639,7 +694,13 @@ def train(config: dict):
 
     # Visualization setup
     enable_viz = config.get("enable_visualization", True)
-    viz_batch  = _pick_viz_batch(val_loader) if enable_viz else None
+    if enable_viz:
+        print("Picking viz batch (scanning val set)...", end=" ", flush=True)
+        t_viz = time.time()
+        viz_batch = _pick_viz_batch(val_loader)
+        print(f"done ({time.time()-t_viz:.1f}s)")
+    else:
+        viz_batch = None
     viz_dir    = os.path.join(run_dir, "visualizations")
     if viz_batch is not None:
         os.makedirs(viz_dir, exist_ok=True)
@@ -652,6 +713,7 @@ def train(config: dict):
 
     writer = SummaryWriter(log_dir=os.path.join(run_dir, "tensorboard"))
     print(f"TensorBoard: tensorboard --logdir {os.path.join(run_dir, 'tensorboard')}")
+    print("Starting training loop...")
 
     train_losses, val_losses          = [], []
     train_metrics_hist, val_metrics_hist = [], []
@@ -663,6 +725,7 @@ def train(config: dict):
 
     for epoch in range(1, num_epochs + 1):
         t0 = time.time()
+        train_sampler.set_epoch(epoch)
 
         # Linear LR warmup
         if warmup > 0 and epoch <= warmup:
@@ -773,5 +836,9 @@ def train(config: dict):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train piano transcription model")
     parser.add_argument("--overfit", action="store_true", help="Use overfit config")
+    parser.add_argument(
+        "--resume", default=None, metavar="CHECKPOINT",
+        help="Load model weights from this checkpoint before training (fresh optimizer)",
+    )
     args = parser.parse_args()
-    train(get_active_config(args.overfit))
+    train(get_active_config(args.overfit), resume_checkpoint=args.resume)

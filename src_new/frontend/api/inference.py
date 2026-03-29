@@ -9,96 +9,223 @@ import os
 import json
 import numpy as np
 import torch
-import pretty_midi
+import librosa
 
 # ── path setup ────────────────────────────────────────────────────────────────
-# src_new/frontend/api  →  go up 3 levels to repo root, then into src_new
-API_DIR  = os.path.dirname(os.path.abspath(__file__))
-ROOT     = os.path.abspath(os.path.join(API_DIR, "..", "..", ".."))
-SRC_NEW  = os.path.join(ROOT, "src_new")
+# src_new/frontend/api  →  go up 2 levels to workspace root, then into src_new
+API_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_NEW = os.path.abspath(os.path.join(API_DIR, "..", "..", "..","src_new"))
 sys.path.insert(0, SRC_NEW)
 
 from model import PianoTranscriptionModel   # src_new/model.py
 
-# ── default config (mirrors src_new/config.py) ───────────────────────────────
-DEFAULT_CONFIG = {
-    "sample_rate":       48000,
-    "roll_fps":          100,
-    "n_mels":            352,        # 88 * 4
-    "n_fft":             4096,
-    "hop_length":        480,        # sample_rate / roll_fps
-    "num_keys":          88,
-    "hidden_size":       256,
-    "num_heads":         8,
-    "num_layers":        4,
-    "dropout":           0.2,
-    "duration_mode":     "log",
-    "num_duration_bins": 8,
-}
-
-ONSET_THRESH  = float(os.environ.get("ONSET_THRESH",  "0.5"))
-FRAME_THRESH  = float(os.environ.get("FRAME_THRESH",  "0.3"))
-CHECKPOINT    = os.environ.get(
+# ── paths / device ─────────────────────────────────────────────────────────────
+CHECKPOINT = os.environ.get(
     "CHECKPOINT_PATH",
-    os.path.join(SRC_NEW, "training_run_056", "best_model.pt"),
+    os.path.join(SRC_NEW, "training_run_069", "best_model.pt"),
 )
-DEVICE = "mps" if torch.backends.mps.is_available() else \
-         "cuda" if torch.cuda.is_available() else "cpu"
+DEVICE = (
+    "mps"  if torch.backends.mps.is_available() else
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
-# ── lazy model load ────────────────────────────────────────────────────────────
-_model        = None
-_model_config = None
+# ── lazy globals ───────────────────────────────────────────────────────────────
+_model       = None
+_cfg         = None
+_norm        = None
+
 
 def _get_model():
-    global _model, _model_config
+    global _model, _cfg, _norm
 
     if _model is not None:
-        return _model, _model_config
+        return _model, _cfg, _norm
 
     if not os.path.exists(CHECKPOINT):
         raise FileNotFoundError(
             f"Checkpoint not found: {CHECKPOINT}\n"
-            f"Set the CHECKPOINT_PATH environment variable to the correct path."
+            "Set CHECKPOINT_PATH environment variable."
         )
 
-    # Load config.json from the same folder as the checkpoint if available
-    cfg = DEFAULT_CONFIG.copy()
-    config_path = os.path.join(os.path.dirname(CHECKPOINT), "config.json")
+    run_dir = os.path.dirname(CHECKPOINT)
+
+    # Defaults matching current config.py
+    cfg = {
+        "sample_rate": 48000, "roll_fps": 100,
+        "n_mels": 352, "n_fft": 4096, "hop_length": 480, "num_keys": 88,
+        "cnn_channels": [32, 64, 128],
+        "cnn_freq_kernels": [87, 31, 15],
+        "cnn_time_kernel": 9,
+        "cnn_freq_pool": [4, 2, 4],
+        "transformer_dim": 256, "transformer_heads": 8, "transformer_layers": 4,
+        "dropout": 0.1,
+        "default_inference_onset_threshold": 0.5,
+        "default_inference_frame_threshold": 0.4,
+        "inference_apply_onset_frame_gating": True,
+    }
+
+    config_path = os.path.join(run_dir, "config.json")
     if os.path.exists(config_path):
         with open(config_path) as f:
             cfg.update(json.load(f))
         print(f"[inference] Loaded config from {config_path}")
-    else:
-        print(f"[inference] No config.json next to checkpoint – using defaults")
+
+    thr_path = os.path.join(run_dir, "best_threshold.json")
+    if os.path.exists(thr_path):
+        with open(thr_path) as f:
+            d = json.load(f)
+            cfg["default_inference_onset_threshold"] = d.get(
+                "onset_threshold", d.get("best_threshold",
+                cfg["default_inference_onset_threshold"])
+            )
+
+    norm = {"mode": "none"}
+    norm_path = os.path.join(run_dir, "normalization_stats.json")
+    if os.path.exists(norm_path):
+        with open(norm_path) as f:
+            norm = json.load(f)
+        print(f"[inference] Normalization: {norm}")
 
     model = PianoTranscriptionModel(
-        input_features    = cfg["n_mels"],
-        num_keys          = cfg["num_keys"],
-        transformer_dim   = cfg["hidden_size"],
-        num_heads         = cfg["num_heads"],
-        num_layers        = cfg["num_layers"],
-        dropout           = cfg["dropout"],
-        duration_mode     = cfg["duration_mode"],
-        num_duration_bins = cfg["num_duration_bins"],
+        n_mels=cfg["n_mels"],
+        num_keys=cfg["num_keys"],
+        cnn_channels=tuple(cfg["cnn_channels"]),
+        cnn_freq_kernels=tuple(cfg["cnn_freq_kernels"]),
+        cnn_time_kernel=cfg["cnn_time_kernel"],
+        cnn_freq_pool=tuple(cfg["cnn_freq_pool"]),
+        transformer_dim=cfg["transformer_dim"],
+        transformer_heads=cfg["transformer_heads"],
+        transformer_layers=cfg["transformer_layers"],
+        dropout=0.0,
     ).to(DEVICE)
 
-    state = torch.load(CHECKPOINT, map_location=DEVICE)
-    # Support both raw state-dicts and wrapped checkpoints
+    state = torch.load(CHECKPOINT, map_location=DEVICE, weights_only=True)
     if isinstance(state, dict) and "model_state_dict" in state:
         state = state["model_state_dict"]
     model.load_state_dict(state)
     model.eval()
     print(f"[inference] Model loaded from {CHECKPOINT} on {DEVICE}")
 
-    _model        = model
-    _model_config = cfg
-    return _model, _model_config
+    _model, _cfg, _norm = model, cfg, norm
+    return _model, _cfg, _norm
 
 
-# ── audio helpers ──────────────────────────────────────────────────────────────
+# ── audio / mel helpers ────────────────────────────────────────────────────────
+def _compute_melspec(y: np.ndarray, cfg: dict, norm: dict) -> np.ndarray:
+    S = librosa.feature.melspectrogram(
+        y=y, sr=cfg["sample_rate"],
+        n_fft=cfg["n_fft"], hop_length=cfg["hop_length"], n_mels=cfg["n_mels"],
+    )
+    spec = librosa.power_to_db(S, ref=np.max).astype(np.float32)
+    if norm.get("mode") == "global":
+        mean = float(norm.get("mean", 0.0))
+        std  = float(norm.get("std",  1.0))
+        spec = (spec - mean) / max(std, 1e-8)
+    return spec  # (n_mels, T)
+
+
+# ── chunked overlap-add inference ─────────────────────────────────────────────
+def _run_chunked(model, spec: np.ndarray, cfg: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Returns (onset_prob, frame_prob) each shaped (T, 88)."""
+    chunk   = 600
+    overlap = 120
+    stride  = chunk - overlap
+    n_mels, T = spec.shape
+    num_keys  = cfg.get("num_keys", 88)
+
+    onset_acc  = np.zeros((T, num_keys), np.float32)
+    frame_acc  = np.zeros((T, num_keys), np.float32)
+    weight_acc = np.zeros((T, 1),        np.float32)
+
+    starts = list(range(0, max(1, T - chunk + 1), stride))
+    if not starts or starts[-1] != max(0, T - chunk):
+        starts.append(max(0, T - chunk))
+
+    with torch.no_grad():
+        for s in starts:
+            e  = min(T, s + chunk)
+            ch = spec[:, s:e]
+            if ch.shape[1] < chunk:
+                ch = np.pad(ch, ((0, 0), (0, chunk - ch.shape[1])))
+            x   = torch.from_numpy(ch).float().unsqueeze(0).unsqueeze(0).to(DEVICE)
+            out = model(x)
+            op  = torch.sigmoid(out["onset"]).squeeze(0).cpu().numpy()  # (chunk, 88)
+            fp  = torch.sigmoid(out["frame"]).squeeze(0).cpu().numpy()
+            vl  = e - s
+            blend = np.ones((vl, 1), np.float32)
+            if overlap > 0 and vl > overlap:
+                ramp = np.linspace(0.0, 1.0, overlap, dtype=np.float32).reshape(-1, 1)
+                if s > 0:
+                    blend[:overlap] = ramp
+                if e < T:
+                    blend[-overlap:] = ramp[::-1]
+            onset_acc[s:e]  += op[:vl] * blend
+            frame_acc[s:e]  += fp[:vl] * blend
+            weight_acc[s:e] += blend
+
+    w = np.maximum(weight_acc, 1e-8)
+    return onset_acc / w, frame_acc / w
+
+
+# ── note decoding ──────────────────────────────────────────────────────────────
+_NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+def _midi_to_name(n: int) -> str:
+    return f"{_NOTE_NAMES[n % 12]}{n // 12 - 1}"
+
+
+def _decode_notes(onset_prob: np.ndarray, frame_prob: np.ndarray,
+                  cfg: dict) -> list[dict]:
+    onset_thr    = float(cfg.get("default_inference_onset_threshold", 0.5))
+    frame_thr    = float(cfg.get("default_inference_frame_threshold", 0.4))
+    fps          = float(cfg.get("roll_fps", 100))
+    apply_gating = cfg.get("inference_apply_onset_frame_gating", True)
+
+    onset_bin = onset_prob >= onset_thr
+    frame_bin = frame_prob >= frame_thr
+
+    notes = []
+    T, num_keys = onset_bin.shape
+    MIDI_A0 = 21
+
+    for k in range(num_keys):
+        pitch      = k + MIDI_A0
+        active     = False
+        note_start = 0
+
+        for t in range(T):
+            triggered = onset_bin[max(0, t - 1):t + 2, k].any()
+            if not active and triggered:
+                active     = True
+                note_start = t
+            elif apply_gating and active and not frame_bin[t, k]:
+                dur = (t - note_start) / fps
+                if dur >= 0.05:
+                    notes.append({
+                        "pitch": pitch, "midi_note": pitch,
+                        "start": round(note_start / fps, 4),
+                        "end":   round(t / fps, 4),
+                        "note_name": _midi_to_name(pitch),
+                    })
+                active = False
+
+        if active:
+            dur = (T - note_start) / fps
+            if dur >= 0.05:
+                notes.append({
+                    "pitch": pitch, "midi_note": pitch,
+                    "start": round(note_start / fps, 4),
+                    "end":   round(T / fps, 4),
+                    "note_name": _midi_to_name(pitch),
+                })
+
+    notes.sort(key=lambda n: n["start"])
+    return notes
+
+
+# ── (kept for legacy compat – unused) ─────────────────────────────────────────
 def _load_audio(path: str, start: float, end: float | None,
                 sample_rate: int) -> np.ndarray:
-    import librosa
     y, _ = librosa.load(
         path, sr=sample_rate, mono=True,
         offset=start,
@@ -107,8 +234,7 @@ def _load_audio(path: str, start: float, end: float | None,
     return y
 
 
-def _compute_melspec(y: np.ndarray, cfg: dict) -> torch.Tensor:
-    import librosa
+def _compute_melspec_tensor(y: np.ndarray, cfg: dict) -> torch.Tensor:
     S = librosa.feature.melspectrogram(
         y=y,
         sr=cfg["sample_rate"],
@@ -121,110 +247,31 @@ def _compute_melspec(y: np.ndarray, cfg: dict) -> torch.Tensor:
     return torch.from_numpy(S_db).unsqueeze(0).unsqueeze(0)
 
 
-# ── duration helper ────────────────────────────────────────────────────────────
-def _log_duration_to_seconds(log_dur: np.ndarray) -> np.ndarray:
-    """Invert the log-duration encoding used during training."""
-    return np.expm1(np.clip(log_dur, 0, None))
-
-
-# ── piano-roll → MIDI note list ────────────────────────────────────────────────
-def _predictions_to_notes(onset_roll: np.ndarray,
-                           duration_pred: np.ndarray,
-                           frame_roll: np.ndarray,
-                           fps: float,
-                           onset_thresh: float,
-                           frame_thresh: float,
-                           min_pitch: int = 21) -> list[dict]:
-    """
-    Convert frame-level onset + duration predictions to a list of note dicts.
-
-    Key design:
-    - Scan per pitch.  The FIRST frame where onset >= onset_thresh triggers a note.
-    - A refractory period then suppresses new onsets for that pitch until the
-      frame roll drops back below frame_thresh (i.e. the note has ended).
-      This prevents a single held note from being emitted once per frame.
-    - Note duration comes from the predicted log-duration at the onset frame.
-      If that gives < 50 ms, fall back to scanning the frame roll forward.
-    """
-    notes = []
-    n_frames, n_keys = onset_roll.shape
-
-    for key_idx in range(n_keys):
-        pitch     = key_idx + min_pitch
-        in_note   = False   # refractory flag: True while a note is still sounding
-
-        for f in range(n_frames):
-            frame_active = frame_roll[f, key_idx] >= frame_thresh
-            is_onset     = onset_roll[f, key_idx] >= onset_thresh
-
-            if in_note:
-                # Stay in refractory until the frame roll goes quiet
-                if not frame_active:
-                    in_note = False
-                continue  # never re-trigger while note is still active
-
-            if is_onset:
-                in_note   = True
-                start_sec = f / fps
-
-                # Duration from the model's log-regression head at this onset frame
-                raw_dur = float(duration_pred[f, key_idx])
-                dur_sec = float(np.expm1(max(0.0, raw_dur)))   # inverse of log1p
-
-                if dur_sec < 0.05:
-                    # Fallback: follow the frame roll forward
-                    end_f = f + 1
-                    while end_f < n_frames and frame_roll[end_f, key_idx] >= frame_thresh:
-                        end_f += 1
-                    dur_sec = max(0.05, (end_f - f) / fps)
-
-                notes.append({
-                    "pitch":     pitch,
-                    "start":     round(start_sec, 4),
-                    "end":       round(start_sec + dur_sec, 4),
-                    "midi_note": pitch,
-                    "note_name": pretty_midi.note_number_to_name(pitch),
-                })
-
-    notes.sort(key=lambda n: n["start"])
-    return notes
-
-
 # ── public API ─────────────────────────────────────────────────────────────────
 def run_inference(audio_path: str,
                   start_time: float = 0.0,
                   end_time: float | None = None) -> dict:
 
-    model, cfg = _get_model()
-    fps        = cfg["roll_fps"]
+    model, cfg, norm = _get_model()
 
-    y        = _load_audio(audio_path, start_time, end_time, cfg["sample_rate"])
+    y, _ = librosa.load(
+        audio_path, sr=cfg["sample_rate"], mono=True,
+        offset=start_time,
+        duration=None if end_time is None else end_time - start_time,
+    )
     duration = len(y) / cfg["sample_rate"]
 
-    spec = _compute_melspec(y, cfg).to(DEVICE)   # (1, 1, n_mels, T)
+    spec = _compute_melspec(y, cfg, norm)   # (n_mels, T) numpy
 
-    with torch.no_grad():
-        out = model(spec)   # dict: onset, duration, frame
+    onset_prob, frame_prob = _run_chunked(model, spec, cfg)
 
-    # onset / frame:  (1, T, 88) logits  →  sigmoid  →  numpy
-    onset_roll = torch.sigmoid(out["onset"]).squeeze(0).cpu().numpy()   # (T, 88)
-    frame_roll = torch.sigmoid(out["frame"]).squeeze(0).cpu().numpy()   # (T, 88)
-
-    # duration: (1, T, 88)  log-regression values
-    duration_pred = out["duration"].squeeze(0).cpu().numpy()            # (T, 88)
-
-    notes = _predictions_to_notes(
-        onset_roll, duration_pred, frame_roll,
-        fps=fps,
-        onset_thresh=ONSET_THRESH,
-        frame_thresh=FRAME_THRESH,
-    )
+    notes = _decode_notes(onset_prob, frame_prob, cfg)
 
     return {
         "duration":   round(duration, 3),
-        "fps":        float(fps),
-        "n_frames":   int(onset_roll.shape[0]),
-        "piano_roll": frame_roll.tolist(),    # (T, 88) – used for roll viewer
-        "onset_roll": onset_roll.tolist(),    # (T, 88)
+        "fps":        float(cfg["roll_fps"]),
+        "n_frames":   int(spec.shape[1]),
+        "piano_roll": frame_prob.tolist(),   # (T, 88) float heatmap
+        "onset_roll": onset_prob.tolist(),   # (T, 88)
         "notes":      notes,
     }

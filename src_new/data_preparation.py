@@ -171,8 +171,12 @@ def process_midi(mid_path, output_dir):
         mid_path (str): Path to the MIDI file.
         output_dir (str): Directory to save output files.
     """
-    midi_data = pretty_midi.PrettyMIDI(mid_path)
     file_name = os.path.splitext(os.path.basename(mid_path))[0]
+    output_filename = os.path.join(output_dir, f"{file_name}_piano_roll_with_pedals.npz")
+    if os.path.exists(output_filename):
+        print(f"Skipping (already exists): {file_name}")
+        return
+    midi_data = pretty_midi.PrettyMIDI(mid_path)
 
     # Build onset/duration/frame labels
     labels = create_piano_roll_with_onsets_durations(
@@ -412,17 +416,31 @@ def create_piano_roll_with_onsets_durations(midi_path: str,
     }
 
 if __name__ == "__main__":
+    import argparse as _ap
+    _parser = _ap.ArgumentParser(description="Preprocess MAESTRO year(s) to NPZ")
+    _parser.add_argument(
+        "--year", nargs="+", default=None,
+        help="One or more year folders to process (e.g. --year 2014 2015). "
+             "Defaults to CONFIG split_year_folder.",
+    )
+    _parser.add_argument(
+        "--output", default=None,
+        help="Output directory (default: CONFIG data_dir)",
+    )
+    _args = _parser.parse_args()
+
+    maestro_dir = "../maestro-v3.0.0"
+    output_dir  = _args.output or DATA_DIR
+    years       = _args.year or [SPLIT_YEAR]
+
     print("="*80)
     print("Piano Transcription Data Preparation - Onset + Duration Approach")
+    print(f"Output dir : {output_dir}")
+    print(f"Years      : {years}")
     print("="*80)
-    print(f"\nDuration bins (logarithmic scale):")
-    for i in range(NUM_DURATION_BINS):
-        print(f"  Bin {i}: {get_duration_bin_label(i)}")
-    print(f"\nTotal bins: {NUM_DURATION_BINS}")
-    print(f"FPS: {ROLL_FPS}")
-    print(f"Onset frames: {CONFIG.get('onset_frames', 2)}")
-    print("="*80)
-    
-    maestro_dir = "../maestro-v3.0.0"
-    output_dir = DATA_DIR
-    process_maestro_split(maestro_dir, output_dir, split_year=SPLIT_YEAR)
+
+    os.makedirs(output_dir, exist_ok=True)
+    for year in years:
+        print(f"\n>>> Processing year {year} ...")
+        process_maestro_split(maestro_dir, output_dir, split_year=year)
+    print("\nAll done.")

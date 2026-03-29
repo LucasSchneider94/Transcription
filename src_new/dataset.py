@@ -74,6 +74,13 @@ class PianoTranscriptionDataset(Dataset):
         self.num_files = len(self.files)
         self.rng = np.random.RandomState(seed)
 
+        # Hot file cache — keeps the last _cache_size loaded files in memory.
+        # With the FileGroupedSampler all snippets from one file arrive
+        # consecutively, so a cache of size 2 gives zero redundant disk reads.
+        self._hot_cache: dict = {}
+        self._cache_order: list = []
+        self._cache_size = 2
+
         self.data_cache = {}
         if self.preload_into_ram:
             print(f"Preloading {self.num_files} files into RAM...")
@@ -95,14 +102,22 @@ class PianoTranscriptionDataset(Dataset):
         if self.preload_into_ram:
             return self.data_cache[file_path]
 
-        with np.load(file_path) as data:
-            return {
-                "spectrogram": data["spectrogram"],
-                "onset": data["onset"],
-                "duration": data["duration"],
-                "frame": data["frame"],
-                "pedal": data["pedal"],
-            }
+        if file_path not in self._hot_cache:
+            # Evict LRU entry when full
+            if len(self._cache_order) >= self._cache_size:
+                evict = self._cache_order.pop(0)
+                self._hot_cache.pop(evict, None)
+            with np.load(file_path) as data:
+                self._hot_cache[file_path] = {
+                    "spectrogram": data["spectrogram"],
+                    "onset":       data["onset"],
+                    "duration":    data["duration"],
+                    "frame":       data["frame"],
+                    "pedal":       data["pedal"],
+                }
+            self._cache_order.append(file_path)
+
+        return self._hot_cache[file_path]
 
     def _get_start_random(self, total_frames):
         return self.rng.randint(0, total_frames - self.snippet_frames + 1)

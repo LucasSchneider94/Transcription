@@ -6,7 +6,7 @@ CONFIG = {
     'n_fft': 4096,
     'plot_pngs': True,
 
-    # Data paths
+    # Data paths — all currently processed years (2013–2015, 2018)
     'data_dir': './processed_data_17_18',
     'maestro_json': './maestro-v3.0.0.json',
     'split_year_folder': '2013',
@@ -22,7 +22,7 @@ CONFIG = {
 
     # Training data slicing
     'snippet_duration': 3.0,
-    'snippets_per_file': 10,   # × 444 files / B=16 → ~277 batches/epoch (~8-9h overnight)
+    'snippets_per_file': 20,
     'data_fraction': 1.0,
     'fixed_snippets': False,
 
@@ -30,14 +30,14 @@ CONFIG = {
     'sampling_mode': 'onset_aware',         # one of: random, onset_aware
     'onset_sampling_min_active_ratio': 0.5,
 
-    # Optimization
+    # Optimization — fine-tune: low LR, no warmup, shorter run
     'batch_size': 16,
-    'learning_rate': 1e-4,
-    'num_epochs': 200,
+    'learning_rate': 3e-5,
+    'num_epochs': 100,
     'weight_decay': 1e-4,
     'grad_clip_norm': 1.0,
     'deterministic_seed': 42,
-    'use_amp': True,
+    'use_amp': False,   # MPS autocast is unstable; use full fp32
 
     # Model architecture (separable CNN + Transformer)
     # CNN stage: three ConvBlocks with alternating freq + time convolutions.
@@ -82,18 +82,23 @@ CONFIG = {
     'enable_visualization': True,
 
     # Learning rate scheduler settings
+    # threshold=0.005 requires 0.5% relative improvement to reset patience,
+    # preventing noise from indefinitely deferring LR reduction.
     'use_lr_scheduler': True,
     'scheduler_type': 'reduce_on_plateau',
     'scheduler_factor': 0.5,
-    'scheduler_patience': 12,
-    'warmup_epochs': 10,
-    'scheduler_min_lr': 5e-7,
+    'scheduler_patience': 10,
+    'scheduler_threshold': 0.005,
+    'scheduler_threshold_mode': 'rel',
+    'warmup_epochs': 0,         # no warmup for fine-tuning
+    'scheduler_min_lr': 1e-6,
 
-    # DataLoader settings
-    'num_workers': 4,
+    # DataLoader settings — num_workers=0 is required for the LRU file cache
+    # (worker processes have separate address spaces and cannot share the cache)
+    'num_workers': 0,
     'pin_memory': False,
     'prefetch_factor': 2,
-    'persistent_workers': True,
+    'persistent_workers': False,
     'preload_into_ram': False,
 
     # Optional overfit switch for CLI
