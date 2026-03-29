@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AnalysisResult } from "@/app/page";
+import type { BeatGrid } from "@/lib/quantize";
 
-type Props = { result: AnalysisResult };
+type Props = { result: AnalysisResult; beatGrid?: BeatGrid };
 
 const PITCH_MIN = 21;   // A0
 const PITCH_MAX = 108;  // C8
@@ -17,7 +18,7 @@ function isBlack(pitch: number) {
   return BLACK_KEYS.has(pitch % 12);
 }
 
-export default function PianoRollViewer({ result }: Props) {
+export default function PianoRollViewer({ result, beatGrid }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollX, setScrollX] = useState(0);
@@ -39,9 +40,11 @@ export default function PianoRollViewer({ result }: Props) {
     const clrBg           = style.getPropertyValue("--roll-bg").trim()           || "#0d0d0d";
     const clrStripeBlack  = style.getPropertyValue("--roll-stripe-black").trim() || "#131313";
     const clrStripeWhite  = style.getPropertyValue("--roll-stripe-white").trim() || "#181818";
-    const clrGrid         = style.getPropertyValue("--roll-grid").trim()         || "#232323";
-    const clrNoteWhite    = style.getPropertyValue("--roll-note-white").trim()   || "#c8922d";
-    const clrNoteBlack    = style.getPropertyValue("--roll-note-black").trim()   || "#a87030";
+    const clrGrid         = style.getPropertyValue("--roll-grid").trim()         || "#1a281a";
+    const clrBeat         = style.getPropertyValue("--roll-beat").trim()         || "rgba(61,170,114,0.20)";
+    const clrBar          = style.getPropertyValue("--roll-bar").trim()          || "rgba(61,170,114,0.45)";
+    const clrNoteWhite    = style.getPropertyValue("--roll-note-white").trim()   || "#3daa72";
+    const clrNoteBlack    = style.getPropertyValue("--roll-note-black").trim()   || "#1d9080";
 
     // background
     ctx.fillStyle = clrBg;
@@ -55,15 +58,40 @@ export default function PianoRollViewer({ result }: Props) {
       ctx.fillRect(0, y, totalWidth, ROW_H);
     }
 
-    // second grid lines
-    ctx.strokeStyle = clrGrid;
-    ctx.lineWidth = 0.5;
-    for (let s = 0; s <= result.duration; s++) {
-      const x = s * PX_PER_S;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, totalHeight);
-      ctx.stroke();
+    // vertical grid lines
+    if (beatGrid) {
+      // sub-grid (lightest) — only draw if spacing is at least 6px to avoid clutter
+      const subSpacingPx = (beatGrid.subs[1] ?? 0 - (beatGrid.subs[0] ?? 0)) * PX_PER_S;
+      if (subSpacingPx >= 6) {
+        ctx.strokeStyle = clrGrid;
+        ctx.lineWidth = 0.5;
+        for (const t of beatGrid.subs) {
+          const x = t * PX_PER_S;
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalHeight); ctx.stroke();
+        }
+      }
+      // beat lines
+      ctx.strokeStyle = clrBeat;
+      ctx.lineWidth = 1;
+      for (const t of beatGrid.beats) {
+        const x = t * PX_PER_S;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalHeight); ctx.stroke();
+      }
+      // bar lines (strongest)
+      ctx.strokeStyle = clrBar;
+      ctx.lineWidth = 1.5;
+      for (const t of beatGrid.bars) {
+        const x = t * PX_PER_S;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalHeight); ctx.stroke();
+      }
+    } else {
+      // fallback: 1-second lines
+      ctx.strokeStyle = clrGrid;
+      ctx.lineWidth = 0.5;
+      for (let s = 0; s <= result.duration; s++) {
+        const x = s * PX_PER_S;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalHeight); ctx.stroke();
+      }
     }
 
     // Truncate each note at the next onset on the same pitch so re-strikes
@@ -100,7 +128,7 @@ export default function PianoRollViewer({ result }: Props) {
       ctx.roundRect(x, y, w, h, 2);
       ctx.fill();
     }
-  }, [result, totalWidth, totalHeight]);
+  }, [result, totalWidth, totalHeight, beatGrid]);
 
   return (
     <div className="space-y-2">

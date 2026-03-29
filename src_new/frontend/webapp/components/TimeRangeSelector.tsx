@@ -1,5 +1,7 @@
 "use client";
 
+import { useNoScrollOnFocus } from "@/lib/useNoScrollOnFocus";
+
 type Props = {
   duration: number;
   start: number;
@@ -14,6 +16,7 @@ function fmt(s: number) {
 }
 
 export default function TimeRangeSelector({ duration, start, end, onChange }: Props) {
+  const noScroll = useNoScrollOnFocus();
   return (
     <div className="space-y-4">
       {/* dual slider track */}
@@ -40,6 +43,7 @@ export default function TimeRangeSelector({ duration, start, end, onChange }: Pr
             const v = Math.min(Number(e.target.value), end - 0.5);
             onChange(v, end);
           }}
+          {...noScroll}
           className="absolute inset-0 w-full opacity-0 cursor-pointer h-6"
           style={{ zIndex: 2 }}
         />
@@ -54,6 +58,7 @@ export default function TimeRangeSelector({ duration, start, end, onChange }: Pr
             const v = Math.max(Number(e.target.value), start + 0.5);
             onChange(start, v);
           }}
+          {...noScroll}
           className="absolute inset-0 w-full opacity-0 cursor-pointer h-6"
           style={{ zIndex: 3 }}
         />

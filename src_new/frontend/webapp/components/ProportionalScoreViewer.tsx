@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { Note } from "@/app/page";
 
-type Props = { notes: Note[]; duration: number };
+type Props = { notes: Note[]; duration: number; bpm?: number };
 
-export default function ProportionalScoreViewer({ notes, duration }: Props) {
+export default function ProportionalScoreViewer({ notes, duration, bpm }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("idle");
@@ -16,14 +16,14 @@ export default function ProportionalScoreViewer({ notes, duration }: Props) {
     setError(null);
     setStatus("loading VexFlow…");
 
-    renderScore(containerRef.current, notes)
+    renderScore(containerRef.current, notes, bpm)
       .then(() => setStatus("ok"))
       .catch((e: unknown) => {
         console.error("ProportionalScoreViewer error:", e);
         setError(e instanceof Error ? e.message : String(e));
         setStatus("error");
       });
-  }, [notes, duration]);
+  }, [notes, duration, bpm]);
 
   return (
     <div className="space-y-2">
@@ -40,7 +40,9 @@ export default function ProportionalScoreViewer({ notes, duration }: Props) {
         className="rounded-xl bg-white overflow-x-hidden overflow-y-auto max-h-[80vh] p-2 [&_svg]:text-black [&_text]:fill-black [&_path]:stroke-black"
       />
       <p className="text-xs text-muted">
-        Note values inferred by clustering actual durations · barlines are layout only
+        {bpm != null
+          ? `Note values derived from ${bpm} BPM · 4/4 layout · enable quantization to use this mode`
+          : "Note values inferred by clustering actual durations · barlines are layout only"}
       </p>
     </div>
   );
@@ -127,114 +129,201 @@ function midiToVex(midi: number): { key: string; accidental: string | null } {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// BPM-based duration helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BEAT_DURS: [number, string][] = [
+  [4, "w"], [2, "h"], [1, "q"], [0.5, "8"], [0.25, "16"], [0.125, "32"],
+];
+
+/** Round to nearest 32nd-note grid (0.125 beats). */
+function r2g(beats: number): number {
+  return Math.round(beats * 8) / 8;
+}
+
+function beatDurToVex(beats: number): string {
+  let best = "q", bestDist = Infinity;
+  for (const [val, name] of BEAT_DURS) {
+    const d = Math.abs(Math.log2(Math.max(0.001, beats) / val));
+    if (d < bestDist) { bestDist = d; best = name; }
+  }
+  return best;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main render
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function renderScore(container: HTMLDivElement, rawNotes: Note[]) {
-  // VexFlow 4.0.x exports everything as named exports from the root
+async function renderScore(container: HTMLDivElement, rawNotes: Note[], bpm?: number) {
   const { Renderer, Stave, StaveNote, Voice, Formatter, Accidental, Beam } =
     await import("vexflow");
 
   container.innerHTML = "";
 
-  const notes  = dedup(rawNotes);
+  const notes = dedup(rawNotes);
   if (notes.length === 0) return;
 
-  const durMap = clusterDurations(notes);
+  type SN      = InstanceType<typeof StaveNote>;
+  type Measure = { t: SN[]; b: SN[] };
 
-  // ── Group simultaneous notes into chord slots ────────────────────────────
-  type Slot = { time: number; treble: Note[]; bass: Note[] };
-  const slots: Slot[] = [];
-  const sorted = [...notes].sort((a, b) => a.start - b.start);
+  // ── BPM mode: independent per-voice timeline → no cross-voice rest drift ──
+  function buildMeasuresBPM(tempo: number): Measure[] {
+    const beatS  = 60 / tempo;
 
-  for (const note of sorted) {
-    const last = slots[slots.length - 1];
-    if (last && Math.abs(note.start - last.time) < 0.04) {
-      (note.midi_note >= 60 ? last.treble : last.bass).push(note);
-    } else {
-      slots.push({
-        time:   note.start,
-        treble: note.midi_note >= 60 ? [note] : [],
-        bass:   note.midi_note >= 60 ? [] : [note],
-      });
+    interface Chord { startBeat: number; durBeats: number; midiNotes: number[] }
+
+    function groupChords(voiceNotes: Note[]): Chord[] {
+      const sorted = [...voiceNotes].sort((a, b) => a.start - b.start);
+      const chords: Chord[] = [];
+      for (const n of sorted) {
+        const sb = r2g(n.start / beatS);
+        const db = Math.max(0.125, r2g((n.end - n.start) / beatS));
+        const last = chords[chords.length - 1];
+        // group notes within one 32nd note of each other as a chord
+        if (last && Math.abs(sb - last.startBeat) < 0.13) {
+          last.midiNotes.push(n.midi_note);
+          last.durBeats = Math.max(last.durBeats, db);
+        } else {
+          chords.push({ startBeat: sb, durBeats: db, midiNotes: [n.midi_note] });
+        }
+      }
+      return chords;
     }
+
+    function makeRestsBeats(beats: number, restKey: string, clef: string): SN[] {
+      const out: SN[] = [];
+      let rem = r2g(beats);
+      for (const [val, name] of BEAT_DURS) {
+        while (rem >= val - 0.05) {
+          out.push(new StaveNote({ clef, keys: [restKey], duration: name + "r" }));
+          rem = r2g(rem - val);
+        }
+      }
+      return out;
+    }
+
+    function buildVoiceMeasure(
+      chords: Chord[], measureStart: number, clef: "treble" | "bass",
+    ): SN[] {
+      const BEATS  = 4;
+      const mEnd   = measureStart + BEATS;
+      const restKey = clef === "treble" ? "b/4" : "d/3";
+      const inM    = chords.filter(c => c.startBeat >= measureStart && c.startBeat < mEnd);
+      const out: SN[] = [];
+      let pos = measureStart;
+
+      for (const chord of inM) {
+        const gap = r2g(chord.startBeat - pos);
+        if (gap >= 0.125) {
+          out.push(...makeRestsBeats(gap, restKey, clef));
+          pos = chord.startBeat;
+        }
+        const dur    = r2g(Math.min(chord.durBeats, mEnd - chord.startBeat));
+        const vexDur = beatDurToVex(Math.max(0.125, dur));
+        const sorted = [...chord.midiNotes].sort((a, b) => a - b);
+        const keys   = sorted.map(m => midiToVex(m).key);
+        const sn     = new StaveNote({ clef, keys, duration: vexDur });
+        sorted.forEach((m, i) => {
+          const { accidental } = midiToVex(m);
+          if (accidental) sn.addModifier(new Accidental(accidental), i);
+        });
+        out.push(sn);
+        pos = r2g(chord.startBeat + dur);
+      }
+
+      const tail = r2g(mEnd - pos);
+      if (tail >= 0.125) out.push(...makeRestsBeats(tail, restKey, clef));
+      return out;
+    }
+
+    const trebleChords = groupChords(notes.filter(n => n.midi_note >= 60));
+    const bassChords   = groupChords(notes.filter(n => n.midi_note < 60));
+
+    const lastBeat = Math.max(
+      trebleChords.length ? trebleChords[trebleChords.length - 1].startBeat + trebleChords[trebleChords.length - 1].durBeats : 0,
+      bassChords.length   ? bassChords  [bassChords.length   - 1].startBeat + bassChords  [bassChords.length   - 1].durBeats : 0,
+      4,
+    );
+    const nMeasures = Math.ceil(lastBeat / 4);
+    return Array.from({ length: nMeasures }, (_, mi) => ({
+      t: buildVoiceMeasure(trebleChords, mi * 4, "treble"),
+      b: buildVoiceMeasure(bassChords,   mi * 4, "bass"),
+    }));
   }
 
-  // ── Build StaveNotes ──────────────────────────────────────────────────────
-  function makeNote(
-    slotNotes: Note[], fallbackDur: string, isRest: boolean, clef: "treble" | "bass"
-  ): InstanceType<typeof StaveNote> {
-    if (isRest || slotNotes.length === 0) {
-      return new StaveNote({
-        clef, keys: [clef === "treble" ? "b/4" : "d/3"],
-        duration: fallbackDur + "r",
-      });
-    }
-    // Longest note drives the duration of the whole chord
-    let bestDur = "32", bestBeats = 0;
-    for (const n of slotNotes) {
-      const ni  = notes.indexOf(n);
-      const dur = durMap.get(ni) ?? "q";
-      const b   = VEX_BEATS[dur] ?? 1;
-      if (b > bestBeats) { bestBeats = b; bestDur = dur; }
-    }
-    const keysArr = [...slotNotes]
-      .sort((a, b) => a.midi_note - b.midi_note)
-      .map(n => midiToVex(n.midi_note).key);
+  // ── Cluster mode: legacy slot-based packing (no tempo context) ────────────
+  function buildMeasuresCluster(): Measure[] {
+    const durMap = clusterDurations(notes);
 
-    const sn = new StaveNote({ clef, keys: keysArr, duration: bestDur });
-    [...slotNotes]
-      .sort((a, b) => a.midi_note - b.midi_note)
-      .forEach((n, i) => {
+    type Slot = { time: number; treble: Note[]; bass: Note[] };
+    const slots: Slot[] = [];
+    const sorted = [...notes].sort((a, b) => a.start - b.start);
+    for (const note of sorted) {
+      const last = slots[slots.length - 1];
+      if (last && Math.abs(note.start - last.time) < 0.04) {
+        (note.midi_note >= 60 ? last.treble : last.bass).push(note);
+      } else {
+        slots.push({
+          time:   note.start,
+          treble: note.midi_note >= 60 ? [note] : [],
+          bass:   note.midi_note >= 60 ? [] : [note],
+        });
+      }
+    }
+
+    function makeNote(slotNotes: Note[], fallbackDur: string, isRest: boolean, clef: "treble" | "bass"): SN {
+      if (isRest || slotNotes.length === 0) {
+        return new StaveNote({ clef, keys: [clef === "treble" ? "b/4" : "d/3"], duration: fallbackDur + "r" });
+      }
+      let bestDur = "32", bestBeats = 0;
+      for (const n of slotNotes) {
+        const ni  = notes.indexOf(n);
+        const dur = durMap.get(ni) ?? "q";
+        const b   = VEX_BEATS[dur] ?? 1;
+        if (b > bestBeats) { bestBeats = b; bestDur = dur; }
+      }
+      const keysArr = [...slotNotes].sort((a, b) => a.midi_note - b.midi_note).map(n => midiToVex(n.midi_note).key);
+      const sn = new StaveNote({ clef, keys: keysArr, duration: bestDur });
+      [...slotNotes].sort((a, b) => a.midi_note - b.midi_note).forEach((n, i) => {
         const { accidental } = midiToVex(n.midi_note);
         if (accidental) sn.addModifier(new Accidental(accidental), i);
       });
-    return sn;
-  }
-
-  // ── Pack slots into 4/4 measures ─────────────────────────────────────────
-  type Measure = { t: InstanceType<typeof StaveNote>[]; b: InstanceType<typeof StaveNote>[] };
-  const measures: Measure[] = [];
-  let cur: Measure = { t: [], b: [] };
-  let tb = 0, bb = 0;
-  const BEATS = 4;
-
-  function padStaff(
-    arr: InstanceType<typeof StaveNote>[], beats: number, clef: "treble" | "bass"
-  ): number {
-    while (beats < BEATS) {
-      const fill  = (BEATS - beats) >= 2 ? "h" : "q";
-      arr.push(makeNote([], fill, true, clef));
-      beats += VEX_BEATS[fill];
-    }
-    return beats;
-  }
-
-  for (const slot of slots) {
-    const tDur = (() => {
-      const n = slot.treble[0]; if (!n) return "q";
-      return durMap.get(notes.indexOf(n)) ?? "q";
-    })();
-    const bDur = (() => {
-      const n = slot.bass[0]; if (!n) return "q";
-      return durMap.get(notes.indexOf(n)) ?? "q";
-    })();
-    const tB = VEX_BEATS[tDur] ?? 1;
-    const bB = VEX_BEATS[bDur] ?? 1;
-
-    if (tb + tB > BEATS + 0.01 || bb + bB > BEATS + 0.01) {
-      padStaff(cur.t, tb, "treble"); padStaff(cur.b, bb, "bass");
-      measures.push(cur);
-      cur = { t: [], b: [] }; tb = 0; bb = 0;
+      return sn;
     }
 
-    cur.t.push(makeNote(slot.treble, tDur, slot.treble.length === 0, "treble")); tb += tB;
-    cur.b.push(makeNote(slot.bass,   bDur, slot.bass.length   === 0, "bass"));   bb += bB;
+    const measures: Measure[] = [];
+    let cur: Measure = { t: [], b: [] };
+    let tb = 0, bb = 0;
+    const BEATS = 4;
+
+    function padStaff(arr: SN[], beats: number, clef: "treble" | "bass"): void {
+      let b = beats;
+      while (b < BEATS) {
+        const fill = (BEATS - b) >= 2 ? "h" : "q";
+        arr.push(makeNote([], fill, true, clef));
+        b += VEX_BEATS[fill];
+      }
+    }
+
+    for (const slot of slots) {
+      const tDur = (() => { const n = slot.treble[0]; if (!n) return "q"; return durMap.get(notes.indexOf(n)) ?? "q"; })();
+      const bDur = (() => { const n = slot.bass[0];   if (!n) return "q"; return durMap.get(notes.indexOf(n)) ?? "q"; })();
+      const tB = VEX_BEATS[tDur] ?? 1;
+      const bB = VEX_BEATS[bDur] ?? 1;
+      if (tb + tB > BEATS + 0.01 || bb + bB > BEATS + 0.01) {
+        padStaff(cur.t, tb, "treble"); padStaff(cur.b, bb, "bass");
+        measures.push(cur);
+        cur = { t: [], b: [] }; tb = 0; bb = 0;
+      }
+      cur.t.push(makeNote(slot.treble, tDur, slot.treble.length === 0, "treble")); tb += tB;
+      cur.b.push(makeNote(slot.bass,   bDur, slot.bass.length   === 0, "bass"));   bb += bB;
+    }
+    if (cur.t.length) { padStaff(cur.t, tb, "treble"); padStaff(cur.b, bb, "bass"); measures.push(cur); }
+    return measures;
   }
-  if (cur.t.length) {
-    padStaff(cur.t, tb, "treble"); padStaff(cur.b, bb, "bass");
-    measures.push(cur);
-  }
+
+  // ── Select path ───────────────────────────────────────────────────────────
+  const measures = bpm != null ? buildMeasuresBPM(bpm) : buildMeasuresCluster();
   if (measures.length === 0) return;
 
   // ── Lay out systems ───────────────────────────────────────────────────────

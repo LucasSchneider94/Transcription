@@ -1,12 +1,14 @@
 "use client";
 
-import { useState, useRef, useMemo } from "react";
+import { useState, useRef, useMemo, useEffect } from "react";
 import AudioDropzone from "@/components/AudioDropzone";
 import TimeRangeSelector from "@/components/TimeRangeSelector";
 import PianoRollViewer from "@/components/PianoRollViewer";
 import ProportionalScoreViewer from "@/components/ProportionalScoreViewer";
 import DecodeControls from "@/components/DecodeControls";
+import QuantizeControls from "@/components/QuantizeControls";
 import { decodeNotes, DEFAULT_DECODE_PARAMS, type DecodeParams } from "@/lib/decode";
+import { quantizeNotes, estimateBPM, buildBeatGrid, DEFAULT_QUANTIZE_PARAMS, type QuantizeParams, type BeatGrid } from "@/lib/quantize";
 import { Music2, Loader2 } from "lucide-react";
 
 export type Note = {
@@ -38,6 +40,7 @@ export default function Home() {
   const [error, setError] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("piano_roll");
   const [decodeParams, setDecodeParams] = useState<DecodeParams>(DEFAULT_DECODE_PARAMS);
+  const [quantizeParams, setQuantizeParams] = useState<QuantizeParams>(DEFAULT_QUANTIZE_PARAMS);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   function handleFileAccepted(f: File, duration: number) {
@@ -81,8 +84,32 @@ export default function Home() {
     return decodeNotes(result.onset_roll, result.piano_roll, result.fps, decodeParams);
   }, [result, decodeParams]);
 
+  // Estimate BPM from onsets via autocorrelation
+  const detectedBPM = useMemo(() => {
+    if (!result || decodedNotes.length === 0) return 120;
+    return estimateBPM(decodedNotes, result.fps, result.duration);
+  }, [result, decodedNotes]);
+
+  // Auto-populate BPM into quantize params whenever a new result arrives
+  useEffect(() => {
+    if (!result) return;
+    setQuantizeParams(p => ({ ...p, bpm: detectedBPM }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result]);
+
+  // Quantize note timings against the beat grid
+  const quantizedNotes = useMemo(() => {
+    return quantizeNotes(decodedNotes, quantizeParams);
+  }, [decodedNotes, quantizeParams]);
+
+  // Beat grid for piano roll overlay (only when quantization is enabled)
+  const beatGrid = useMemo((): BeatGrid | undefined => {
+    if (!result || !quantizeParams.enabled) return undefined;
+    return buildBeatGrid(quantizeParams.bpm, result.duration, quantizeParams.subdivision, quantizeParams.beatOffset);
+  }, [result, quantizeParams]);
+
   const displayResult = result
-    ? { ...result, notes: decodedNotes }
+    ? { ...result, notes: quantizedNotes }
     : null;
 
   return (
@@ -144,42 +171,51 @@ export default function Home() {
         </div>
       )}
 
-      {/* Results */}
+      {/* Results — controls + viewer in one section so they stay visible together */}
       {displayResult && (
-        <>
-          {/* Decoding controls */}
-          <DecodeControls params={decodeParams} onChange={setDecodeParams} />
-
-          <section className="bg-surface border border-border rounded-2xl p-6 space-y-4">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold uppercase tracking-widest text-muted">3 · Result</h2>
-              <div className="flex gap-2">
-                {(["piano_roll", "score"] as ViewMode[]).map((m) => (
-                  <button
-                    key={m}
-                    onClick={() => setViewMode(m)}
-                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
-                      ${viewMode === m
-                        ? "bg-accent text-white"
-                        : "bg-border text-muted hover:text-slate-200"}`}
-                  >
-                    {m === "piano_roll" ? "Piano Roll" : "Score"}
-                  </button>
-                ))}
-              </div>
+        <section className="bg-surface border border-border rounded-2xl p-6 space-y-5">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-muted">3 · Result</h2>
+            <div className="flex gap-2">
+              {(["piano_roll", "score"] as ViewMode[]).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setViewMode(m)}
+                  className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors
+                    ${viewMode === m
+                      ? "bg-accent text-white"
+                      : "bg-border text-muted hover:text-slate-200"}`}
+                >
+                  {m === "piano_roll" ? "Piano Roll" : "Score"}
+                </button>
+              ))}
             </div>
+          </div>
 
-            <p className="text-xs text-muted">
-              {displayResult.notes.length} notes · {displayResult.duration.toFixed(2)} s · {displayResult.fps.toFixed(2)} fps
-            </p>
+          {/* Decode + Quantize controls — above viewer so they stay in frame */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <DecodeControls params={decodeParams} onChange={setDecodeParams} />
+            <QuantizeControls
+              params={quantizeParams}
+              detectedBPM={detectedBPM}
+              onChange={setQuantizeParams}
+            />
+          </div>
 
-            {viewMode === "piano_roll" ? (
-              <PianoRollViewer result={displayResult} />
-            ) : (
-              <ProportionalScoreViewer notes={displayResult.notes} duration={displayResult.duration} />
-            )}
-          </section>
-        </>
+          <p className="text-xs text-muted">
+            {displayResult.notes.length} notes · {displayResult.duration.toFixed(2)} s · {displayResult.fps.toFixed(2)} fps
+          </p>
+
+          {viewMode === "piano_roll" ? (
+            <PianoRollViewer result={displayResult} beatGrid={beatGrid} />
+          ) : (
+            <ProportionalScoreViewer
+              notes={displayResult.notes}
+              duration={displayResult.duration}
+              bpm={quantizeParams.enabled ? quantizeParams.bpm : undefined}
+            />
+          )}
+        </section>
       )}
 
       {/* hidden audio element for duration probing */}

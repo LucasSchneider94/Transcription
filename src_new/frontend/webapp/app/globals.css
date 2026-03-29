@@ -37,6 +37,8 @@
   --roll-stripe-black: #0c110c;
   --roll-stripe-white: #101610;
   --roll-grid:         #1a281a;
+  --roll-beat:         rgba(61, 170, 114, 0.20);  /* quarter-note beat lines */
+  --roll-bar:          rgba(61, 170, 114, 0.50);  /* bar lines */
   --roll-note-white:   #3daa72;   /* mid-green */
   --roll-note-black:   #1d9080;   /* teal */
 }
