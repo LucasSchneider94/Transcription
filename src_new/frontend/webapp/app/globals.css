@@ -14,33 +14,33 @@
 */
 :root {
   /* backgrounds */
-  --color-bg:          #080d08;
-  --color-surface:     #101910;
-  --color-surface2:    #182418;
+  --color-bg:          #090909;
+  --color-surface:     #0f1316;
+  --color-surface2:    #1f1f1f;
 
   /* borders */
-  --color-border:      #1e301e;
-  --color-border-strong: #2e4a2e;
+  --color-border:      #262626;
+  --color-border-strong: #4c4c4c;
 
   /* accent — green gradient (warm soft green → teal) */
-  --color-accent:      #3daa72;   /* primary interactive, mid-green */
-  --color-accent-light: #55c47a;  /* hover / lighter variant */
-  --color-accent-cool: #1d9080;   /* teal end of gradient */
-  --color-accent-dim:  rgba(61, 170, 114, 0.10);
+  --color-accent:      #ae1751;   /* primary interactive */
+  --color-accent-light: #e91e63;  /* hover / lighter variant */
+  --color-accent-cool: #9c2780;   /* end of gradient */
+  --color-accent-dim:  #572780;
 
   /* text */
   --color-text:        #ccd8cc;
-  --color-muted:       #455a47;
+  --color-muted:       #57acdc;
 
   /* piano roll canvas */
-  --roll-bg:           #080d08;
+  --roll-bg:           #0b0b0b;
   --roll-stripe-black: #0c110c;
-  --roll-stripe-white: #101610;
-  --roll-grid:         #1a281a;
-  --roll-beat:         rgba(61, 170, 114, 0.20);  /* quarter-note beat lines */
-  --roll-bar:          rgba(61, 170, 114, 0.50);  /* bar lines */
-  --roll-note-white:   #3daa72;   /* mid-green */
-  --roll-note-black:   #1d9080;   /* teal */
+  --roll-stripe-white: #101316;
+  --roll-grid:         #1f1f1f;
+  --roll-beat:         #276880;  /* quarter-note beat lines */
+  --roll-bar:          #572780;  /* bar lines */
+  --roll-note-white:   #57acdc;   
+  --roll-note-black:   #57acdc;   
 }
 
 body {

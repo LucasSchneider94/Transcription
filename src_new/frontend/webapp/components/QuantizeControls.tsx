@@ -90,6 +90,28 @@ export default function QuantizeControls({ params, detectedBPM, onChange }: Prop
           </div>
         </div>
 
+        {/* Meter */}
+        <div className="space-y-1.5">
+          <p className="text-xs text-slate-300">Meter</p>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              value={params.timeSigNum}
+              onChange={e => set("timeSigNum", Math.max(1, parseInt(e.target.value) || 1))}
+              className="w-14 text-center bg-border text-slate-200 text-sm font-mono rounded-lg px-2 py-1 border border-border focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <span className="text-muted text-base leading-none select-none">/</span>
+            <input
+              type="number"
+              min={1}
+              value={params.timeSigDen}
+              onChange={e => set("timeSigDen", Math.max(1, parseInt(e.target.value) || 1))}
+              className="w-14 text-center bg-border text-slate-200 text-sm font-mono rounded-lg px-2 py-1 border border-border focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+          </div>
+        </div>
+
         {/* Beat offset */}
         <div className="space-y-1">
           <div className="flex justify-between text-xs">

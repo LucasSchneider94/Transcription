@@ -8,7 +8,7 @@ import ProportionalScoreViewer from "@/components/ProportionalScoreViewer";
 import DecodeControls from "@/components/DecodeControls";
 import QuantizeControls from "@/components/QuantizeControls";
 import { decodeNotes, DEFAULT_DECODE_PARAMS, type DecodeParams } from "@/lib/decode";
-import { quantizeNotes, estimateBPM, buildBeatGrid, DEFAULT_QUANTIZE_PARAMS, type QuantizeParams, type BeatGrid } from "@/lib/quantize";
+import { quantizeNotes, quantizeNotesFromBarTimes, estimateBPM, buildBeatGrid, buildGridFromBarTimes, DEFAULT_QUANTIZE_PARAMS, type QuantizeParams, type BeatGrid } from "@/lib/quantize";
 import { Music2, Loader2 } from "lucide-react";
 
 export type Note = {
@@ -41,6 +41,7 @@ export default function Home() {
   const [viewMode, setViewMode] = useState<ViewMode>("piano_roll");
   const [decodeParams, setDecodeParams] = useState<DecodeParams>(DEFAULT_DECODE_PARAMS);
   const [quantizeParams, setQuantizeParams] = useState<QuantizeParams>(DEFAULT_QUANTIZE_PARAMS);
+  const [barTimes, setBarTimes] = useState<number[]>([]);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   function handleFileAccepted(f: File, duration: number) {
@@ -99,14 +100,49 @@ export default function Home() {
 
   // Quantize note timings against the beat grid
   const quantizedNotes = useMemo(() => {
+    if (!quantizeParams.enabled) return decodedNotes;
+    if (barTimes.length >= 2) {
+      return quantizeNotesFromBarTimes(
+        decodedNotes, barTimes,
+        quantizeParams.timeSigNum, quantizeParams.subdivision, quantizeParams.strength,
+      );
+    }
     return quantizeNotes(decodedNotes, quantizeParams);
-  }, [decodedNotes, quantizeParams]);
+  }, [decodedNotes, quantizeParams, barTimes]);
 
-  // Beat grid for piano roll overlay (only when quantization is enabled)
+  // Beat grid for piano roll overlay — derives from barTimes so dragged barlines
+  // immediately scale the beats within each bar.
   const beatGrid = useMemo((): BeatGrid | undefined => {
     if (!result || !quantizeParams.enabled) return undefined;
+    if (barTimes.length >= 2) {
+      return buildGridFromBarTimes(barTimes, quantizeParams.timeSigNum, quantizeParams.subdivision, result.duration);
+    }
     return buildBeatGrid(quantizeParams.bpm, result.duration, quantizeParams.subdivision, quantizeParams.beatOffset);
-  }, [result, quantizeParams]);
+  }, [result, quantizeParams, barTimes]);
+
+  // Auto-compute bar positions from BPM + time signature.
+  // barTimes[0] = beatOffset (bar 1 beat 1); subsequent bars spaced by barDur.
+  // Resets whenever BPM, offset, or time sig changes; survives note-param changes.
+  const autoBarTimes = useMemo(() => {
+    if (!result) return [];
+    const { bpm, beatOffset, timeSigNum, timeSigDen } = quantizeParams;
+    const barDur = timeSigNum * (60 / bpm) * (4 / timeSigDen);
+    if (barDur <= 0) return [];
+    const times: number[] = [];
+    // first bar index such that beatOffset + n*barDur is the earliest visible bar
+    const firstN = Math.floor(-beatOffset / barDur);
+    for (let n = firstN; ; n++) {
+      const t = parseFloat((beatOffset + n * barDur).toFixed(6));
+      if (t > result.duration + barDur * 0.01) break;
+      if (t >= -barDur * 0.5) times.push(t);
+    }
+    return times;
+  }, [result, quantizeParams.bpm, quantizeParams.beatOffset, quantizeParams.timeSigNum, quantizeParams.timeSigDen]);
+
+  // Reset user-dragged bar times whenever the auto grid changes
+  useEffect(() => {
+    setBarTimes(autoBarTimes);
+  }, [autoBarTimes]);
 
   const displayResult = result
     ? { ...result, notes: quantizedNotes }
@@ -207,12 +243,20 @@ export default function Home() {
           </p>
 
           {viewMode === "piano_roll" ? (
-            <PianoRollViewer result={displayResult} beatGrid={beatGrid} />
+            <PianoRollViewer
+              result={displayResult}
+              beatGrid={beatGrid}
+              barTimes={barTimes}
+              onBarTimesChange={setBarTimes}
+            />
           ) : (
             <ProportionalScoreViewer
               notes={displayResult.notes}
               duration={displayResult.duration}
-              bpm={quantizeParams.enabled ? quantizeParams.bpm : undefined}
+              bpm={quantizeParams.bpm}
+              beatOffset={quantizeParams.beatOffset}
+              timeSigNum={quantizeParams.timeSigNum}
+              timeSigDen={quantizeParams.timeSigDen}
             />
           )}
         </section>

@@ -4,7 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import type { AnalysisResult } from "@/app/page";
 import type { BeatGrid } from "@/lib/quantize";
 
-type Props = { result: AnalysisResult; beatGrid?: BeatGrid };
+type Props = {
+  result:             AnalysisResult;
+  beatGrid?:          BeatGrid;
+  barTimes?:          number[];
+  onBarTimesChange?:  (times: number[]) => void;
+};
 
 const PITCH_MIN = 21;   // A0
 const PITCH_MAX = 108;  // C8
@@ -18,7 +23,7 @@ function isBlack(pitch: number) {
   return BLACK_KEYS.has(pitch % 12);
 }
 
-export default function PianoRollViewer({ result, beatGrid }: Props) {
+export default function PianoRollViewer({ result, beatGrid, barTimes, onBarTimesChange }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [scrollX, setScrollX] = useState(0);
@@ -77,13 +82,7 @@ export default function PianoRollViewer({ result, beatGrid }: Props) {
         const x = t * PX_PER_S;
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalHeight); ctx.stroke();
       }
-      // bar lines (strongest)
-      ctx.strokeStyle = clrBar;
-      ctx.lineWidth = 1.5;
-      for (const t of beatGrid.bars) {
-        const x = t * PX_PER_S;
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, totalHeight); ctx.stroke();
-      }
+      // bar lines — drawn as draggable overlays, not on canvas
     } else {
       // fallback: 1-second lines
       ctx.strokeStyle = clrGrid;
@@ -158,22 +157,94 @@ export default function PianoRollViewer({ result, beatGrid }: Props) {
           })}
         </div>
 
-        {/* scrollable canvas */}
+        {/* scrollable canvas + draggable barlines */}
         <div
           ref={containerRef}
           className="overflow-x-auto flex-1 rounded-lg"
           onScroll={(e) => setScrollX((e.target as HTMLDivElement).scrollLeft)}
         >
-          <canvas
-            ref={canvasRef}
-            style={{ display: "block", imageRendering: "pixelated" }}
-          />
+          <div className="relative" style={{ width: totalWidth, height: totalHeight }}>
+            <canvas
+              ref={canvasRef}
+              style={{ display: "block", position: "absolute", top: 0, left: 0, imageRendering: "pixelated" }}
+            />
+            {barTimes?.map((t, i) => (
+              <BarHandle
+                key={i}
+                time={Math.max(0, Math.min(result.duration, t))}
+                height={totalHeight}
+                isFirst={i === 0}
+                onDrag={newTime => {
+                  if (!onBarTimesChange) return;
+                  const updated = [...barTimes];
+                  updated[i] = Math.max(0, Math.min(result.duration, newTime));
+                  onBarTimesChange(updated);
+                }}
+              />
+            ))}
+          </div>
         </div>
       </div>
 
       <p className="text-xs text-muted text-right">
         Scroll horizontally to navigate · {result.notes.length} notes
       </p>
+    </div>
+  );
+}
+
+// ─── Draggable barline handle ────────────────────────────────────────────────
+
+function BarHandle({
+  time, height, isFirst, onDrag,
+}: {
+  time: number; height: number; isFirst: boolean; onDrag: (t: number) => void;
+}) {
+  const startXRef    = useRef<number>(0);
+  const startTimeRef = useRef<number>(time);
+
+  function handleMouseDown(e: React.MouseEvent) {
+    e.preventDefault();
+    startXRef.current    = e.clientX;
+    startTimeRef.current = time;
+
+    function onMove(me: MouseEvent) {
+      onDrag(startTimeRef.current + (me.clientX - startXRef.current) / PX_PER_S);
+    }
+    function onUp() {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup",   onUp);
+    }
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup",   onUp);
+  }
+
+  return (
+    <div
+      onMouseDown={handleMouseDown}
+      title={`${isFirst ? "Bar 1 · " : ""}${time.toFixed(3)} s`}
+      style={{
+        position:       "absolute",
+        left:           time * PX_PER_S - 5,
+        top:            0,
+        width:          10,
+        height,
+        cursor:         "ew-resize",
+        zIndex:         10,
+        display:        "flex",
+        justifyContent: "center",
+        userSelect:     "none",
+      }}
+    >
+      <div
+        style={{
+          width:           isFirst ? 2 : 1.5,
+          height:          "100%",
+          // amber for bar 1, green for others
+          backgroundColor: isFirst ? "rgba(250,176,5,0.9)" : "rgba(61,170,114,0.75)",
+          pointerEvents:   "none",
+        }}
+      />
     </div>
   );
 }
