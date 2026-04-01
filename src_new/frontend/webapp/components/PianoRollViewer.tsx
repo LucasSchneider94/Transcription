@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AnalysisResult, Note } from "@/app/page";
 import type { BeatGrid } from "@/lib/quantize";
+import { groupChords, splitChordsBetweenVoices } from "@/lib/vexHelpers";
 import LinearScoreViewer, { LINEAR_SCORE_H, LINE_SPACING, TREBLE_Y as CLEF_TREBLE_Y, BASS_Y as CLEF_BASS_Y } from "@/components/LinearScoreViewer";
+import HeatmapViewer, { type HeatmapMode } from "@/components/HeatmapViewer";
 
 type Props = {
   result:                AnalysisResult;
@@ -15,6 +17,8 @@ type Props = {
   bpm?:                  number;
   keySig?:               string;
   onRegisterMidiExport?: (fn: () => void) => void;
+  showHeatmap?:          boolean;
+  heatmapMode?:          HeatmapMode;
 };
 
 const PITCH_MIN = 21;   // A0
@@ -22,6 +26,10 @@ const PITCH_MAX = 108;  // C8
 const N_KEYS    = PITCH_MAX - PITCH_MIN + 1;
 const ROW_H     = 6;    // px per semitone
 const PX_PER_S  = 80;   // px per second
+
+// Voice colors: dark but distinguishable, matching the app palette
+// [treble-v1, treble-v2, bass-v1, bass-v2]
+const VOICE_COLORS = ["#2e82a0", "#1d8060", "#8a1f4a", "#6b2d80"] as const;
 
 const BLACK_KEYS = new Set([1, 3, 6, 8, 10]); // semitone % 12
 
@@ -32,6 +40,7 @@ function isBlack(pitch: number) {
 export default function PianoRollViewer({
   result, beatGrid, barTimes, onBarTimesChange,
   timeSigNum = 4, timeSigDen = 4, bpm = 120, keySig = "C", onRegisterMidiExport,
+  showHeatmap = false, heatmapMode = "both",
 }: Props) {
   const canvasRef     = useRef<HTMLCanvasElement>(null);
   const containerRef  = useRef<HTMLDivElement>(null);
@@ -132,6 +141,30 @@ export default function PianoRollViewer({
     }
     return out;
   }, [editNotes, GAP_S]);
+
+  // Pre-compute voice index (0-3) for each note using the same split logic as the score
+  const voiceIndex = useMemo(() => {
+    const out = new Map<number, 0 | 1 | 2 | 3>();
+    const beatS = barTimes && barTimes.length >= 2 ? barTimes[1] - barTimes[0] : 60 / bpm;
+    const timeToBeat = (t: number) => {
+      if (!barTimes || barTimes.length < 2) return t / beatS;
+      const bar0 = barTimes[0];
+      return (t - bar0) / beatS;
+    };
+    const treble = editNotes.map((n, i) => ({ ...n, _idx: i })).filter(n => n.midi_note >= 60);
+    const bass   = editNotes.map((n, i) => ({ ...n, _idx: i })).filter(n => n.midi_note < 60);
+    for (const group of [treble, bass]) {
+      const isBass = group === bass;
+      const chords = groupChords(group, timeToBeat, beatS);
+      const [v1c, v2c] = splitChordsBetweenVoices(chords);
+      const v1Set = new Set(v1c.flatMap(c => c.midiNotes));
+      for (const n of group) {
+        const vi: 0 | 1 = v1Set.has(n.midi_note) ? 0 : 1;
+        out.set(n._idx, (isBass ? 2 + vi : vi) as 0 | 1 | 2 | 3);
+      }
+    }
+    return out;
+  }, [editNotes, barTimes, bpm]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -253,6 +286,17 @@ export default function PianoRollViewer({
               keySig={keySig}
             />
 
+            {/* Probability heatmap — shown when showHeatmap is true */}
+            {showHeatmap && (
+              <HeatmapViewer
+                pianoRoll={result.piano_roll}
+                onsetRoll={result.onset_roll}
+                fps={result.fps}
+                duration={result.duration}
+                mode={heatmapMode}
+              />
+            )}
+
             {/* Piano roll canvas + note overlay + draggable barlines */}
             <div
               className="relative"
@@ -291,6 +335,7 @@ export default function PianoRollViewer({
                     note={note}
                     displayEnd={displayEnds.get(idx) ?? note.end}
                     isSelected={selected === idx}
+                    voiceColor={VOICE_COLORS[voiceIndex.get(idx) ?? 0]}
                     onSelect={() => setSelected(idx)}
                     onMove={(newStart, newPitch) => {
                       const dur = note.end - note.start;
@@ -429,11 +474,12 @@ function BarHandle({
 // ─── Note block (DOM, editable) ──────────────────────────────────────────────
 
 function NoteBlock({
-  note, displayEnd, isSelected, onSelect, onMove, onResize,
+  note, displayEnd, isSelected, voiceColor, onSelect, onMove, onResize,
 }: {
   note:        Note;
   displayEnd:  number;
   isSelected:  boolean;
+  voiceColor:  string;
   onSelect:    () => void;
   onMove:      (newStart: number, newPitch: number) => void;
   onResize:    (newEnd: number) => void;
@@ -444,9 +490,7 @@ function NoteBlock({
   const y   = row * ROW_H + 1;
   const h   = ROW_H - 2;
 
-  const clr = isSelected
-    ? "var(--note-highlight)"
-    : isBlack(note.pitch) ? "var(--roll-note-black)" : "var(--roll-note-white)";
+  const clr = isSelected ? "#f59e0b" : voiceColor;
 
   function handleBodyMouseDown(e: React.MouseEvent) {
     e.stopPropagation();

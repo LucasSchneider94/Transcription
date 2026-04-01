@@ -9,6 +9,7 @@ import QuantizeControls from "@/components/QuantizeControls";
 import { decodeNotes, DEFAULT_DECODE_PARAMS, type DecodeParams } from "@/lib/decode";
 import { quantizeNotes, quantizeNotesFromBarTimes, estimateBPM, buildBeatGrid, buildGridFromBarTimes, DEFAULT_QUANTIZE_PARAMS, type QuantizeParams, type BeatGrid } from "@/lib/quantize";
 import { Music2, Loader2, Download } from "lucide-react";
+import type { HeatmapMode } from "@/components/HeatmapViewer";
 
 const KEY_OPTIONS = [
   { label: "C major",  vex: "C"   }, { label: "G major",  vex: "G"   },
@@ -59,6 +60,8 @@ export default function Home() {
   const [quantizeParams, setQuantizeParams] = useState<QuantizeParams>(DEFAULT_QUANTIZE_PARAMS);
   const [barTimes, setBarTimes] = useState<number[]>([]);
   const [keySig, setKeySig]     = useState("C");
+  const [showHeatmap, setShowHeatmap]   = useState(false);
+  const [heatmapMode, setHeatmapMode]   = useState<HeatmapMode>("both");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const midiExportRef = useRef<MidiExportFn | null>(null);
 
@@ -258,6 +261,31 @@ export default function Home() {
                 <option key={k.vex} value={k.vex}>{k.label}</option>
               ))}
             </select>
+
+            {/* Heatmap toggle */}
+            <span className="text-xs font-semibold uppercase tracking-widest text-muted select-none ml-4">Heatmap</span>
+            <button
+              onClick={() => setShowHeatmap(v => !v)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors
+                ${showHeatmap ? "bg-accent" : "bg-border"}`}
+            >
+              <span
+                className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform
+                  ${showHeatmap ? "translate-x-4" : "translate-x-1"}`}
+              />
+            </button>
+
+            {showHeatmap && (
+              <select
+                value={heatmapMode}
+                onChange={e => setHeatmapMode(e.target.value as HeatmapMode)}
+                className="bg-surface border border-border rounded-lg px-2 py-1 text-sm text-white"
+              >
+                <option value="both">Frame + Onset</option>
+                <option value="frame">Frame only</option>
+                <option value="onset">Onset only</option>
+              </select>
+            )}
           </div>
 
           <p className="text-xs text-muted">
@@ -274,6 +302,8 @@ export default function Home() {
             bpm={quantizeParams.bpm}
             keySig={keySig}
             onRegisterMidiExport={fn => { midiExportRef.current = fn; }}
+            showHeatmap={showHeatmap}
+            heatmapMode={heatmapMode}
           />
         </section>
       )}

@@ -23,6 +23,8 @@ const SLIDERS: SliderDef[] = [
   { key: "refractory_ms",   label: "Re-strike gap",     min: 10,   max: 300,  step: 5, format: (v) => `${v} ms` },
   { key: "min_note_ms",     label: "Min note length",   min: 10,   max: 200,  step: 5, format: (v) => `${v} ms` },
   { key: "frame_smoothing", label: "Frame smoothing",   min: 0,    max: 5,    step: 1, format: (v) => v === 0 ? "off" : `±${v} frames` },
+  { key: "ioi_gap_ms",      label: "IOI gap (sustain)", min: 0,    max: 500,  step: 5, format: (v) => v === 0 ? "off" : `${v} ms` },
+  { key: "max_note_s",      label: "Max note length",   min: 0,    max: 8,    step: 0.5, format: (v) => v === 0 ? "off" : `${v.toFixed(1)} s` },
 ];
 
 export default function DecodeControls({ params, onChange }: Props) {
